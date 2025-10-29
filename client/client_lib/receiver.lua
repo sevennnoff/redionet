@@ -69,12 +69,12 @@ end
 function M.toggle_play_local()
     if CSTATE.is_paused or CSTATE.is_paused == nil then -- first click nil
         CSTATE.is_paused = false
-        local status = speaker and 1 or 0 -- speakerless = special case: 0. Syncs but doesn't start receiving
+        local status = speaker and 1 or -1 -- speakerless = special case: -1. Syncs but doesn't start receiving
         rednet.send(SERVER_ID, status, 'PROTO_AUDIO_CONNECTION')
     else
         CSTATE.is_paused = true
         if speaker then
-            rednet.send(SERVER_ID, -1, 'PROTO_AUDIO_CONNECTION') -- TODO: -1 for special case, 0 for paused
+            rednet.send(SERVER_ID, 0, 'PROTO_AUDIO_CONNECTION')
             os.queueEvent("redionet:playback_stopped")
             speaker.stop()
          end
@@ -123,7 +123,7 @@ function M.receive_loop()
 
     local id, message
 
-    rednet.send(SERVER_ID, CSTATE.is_paused and -1 or 1, 'PROTO_AUDIO_CONNECTION')
+    rednet.send(SERVER_ID, CSTATE.is_paused and 0 or 1, 'PROTO_AUDIO_CONNECTION')
 
     while true do
         parallel.waitForAny(
@@ -152,7 +152,7 @@ function M.receive_loop()
             function ()
                 while true do -- no interrupt
                     id, message = rednet.receive('PROTO_AUDIO_STATUS')
-                    rednet.send(id, CSTATE.is_paused and -1 or 1, 'PROTO_AUDIO_CONNECTION')
+                    rednet.send(id, CSTATE.is_paused and 0 or 1, 'PROTO_AUDIO_CONNECTION')
                 end
             end
         )

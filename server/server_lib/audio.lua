@@ -468,21 +468,22 @@ function M.audio_loop()
         function ()
             while true do
                 local id, status = rednet.receive('PROTO_AUDIO_CONNECTION')
-                if status == 0 then
-                    -- special case for speakerless device. Allows sync on toggle Quit/Join, but doesn't add to known receivers.
-                    -- TODO: -1 for special case for API consistency with STATE.data.status 
-                     M.state.need_sync = true
+
+                if status == -1 then -- special case for speakerless device. Allows sync on toggle Quit/Join, but doesn't add to known receivers.
+                    M.state.need_sync = true
                 else
-                    if not M.state.receiver_stats[id] then
+                    if not M.state.receiver_stats[id] then -- new client connection
                         M.state.n_receivers = M.state.n_receivers + 1
                     end
-                    
-                    if M.state.receiver_stats[id] ~= status then
+
+                    if M.state.receiver_stats[id] ~= status then -- only update on status change
                         if status == 1 then
                             M.state.need_sync = true -- NOTE: do not false when ~= 1
+                            M.state.num_active = M.state.num_active + 1
+                        else
+                            M.state.num_active = M.state.num_active - 1
                         end
                         M.state.receiver_stats[id] = status
-                        M.state.num_active = M.state.num_active + status
                     end
                 end
             end
