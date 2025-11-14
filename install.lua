@@ -247,6 +247,10 @@ local function fresh_install()
     term.clear()
     term.setCursorPos(1, 1)
     check_requirements()
+    local repo_url = "github.com/Rypo/redionet"
+    writeColoured("\15 Redionet\n", colors.purple)
+    writeColoured(("\161 %s\n"):format(repo_url), colors.lightGray)
+    term.setTextColor(colors.white)
 
     local choice_idx = mc_question('Assign this computer as', {'Client', 'Server   \4 only set one per world \4'})
     local device_type = ({'client', 'server'})[choice_idx]

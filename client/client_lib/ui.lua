@@ -416,7 +416,7 @@ local function draw_search_tab()
             term.setTextColor(config.colors.text_secondary)
             -- print("Tip: You can paste YouTube video or playlist links.")
             print("Tip: You can also paste YouTube links")
-            write_funding()
+            -- write_funding()
         end
     end
 end

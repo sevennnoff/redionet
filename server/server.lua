@@ -77,8 +77,18 @@ local function restore_state(filename)
 end
 
 --[[ Server Loops ]]
+local function print_header_info()
+    local repo_url = "github.com/Rypo/redionet"
+    term.setTextColor(colors.purple)
+    print("\n\15 Redionet")
+    term.setTextColor(colors.lightGray)
+    print(("\161 %s\n"):format(repo_url))
+    term.setTextColor(colors.gray)
+    print("Help support hosting expenses:\n \x10 patreon.com/exclamatory\n")
+end
 
 local function server_loop()
+    print_header_info()
     term.setTextColor(colors.white)
     chat.writeto(('[READY] Server ID: %d\n'):format(os.getComputerID()))
     local initial_clients = { rednet.lookup('PROTO_AUDIO') }
@@ -202,14 +212,14 @@ local function server_event_loop()
                     -- TODO: bypass issue_command, keep all help display logic in chat module 
                     chat.show_help()
                 elseif cmd == 'sync' then
-                -- need to be cautious about when sync occurs. If timing is off, it will *grow* the speaker buffer rather than clear it
+                    -- need to be cautious about when sync occurs. If timing is off, it will *grow* the speaker buffer rather than clear it
                     audio.state.need_sync = true
                 else
                     rednet.broadcast(cmd, 'PROTO_COMMAND')
                     os.queueEvent(('redionet:%s'):format(cmd))
                 end
             end,
-            
+
             function()
                 os.pullEvent('redionet:sync') -- Queued by command `rn sync`
                 audio.state.speaker_cache = 0 -- stopping speakers wipes any buffered audio
