@@ -197,8 +197,12 @@ local function server_event_loop()
 
             function()
                 local ev, cmd = os.pullEvent('redionet:issue_command')
+
+                if cmd == 'help' then
+                    -- TODO: bypass issue_command, keep all help display logic in chat module 
+                    chat.show_help()
+                elseif cmd == 'sync' then
                 -- need to be cautious about when sync occurs. If timing is off, it will *grow* the speaker buffer rather than clear it
-                if cmd == 'sync' then
                     audio.state.need_sync = true
                 else
                     rednet.broadcast(cmd, 'PROTO_COMMAND')

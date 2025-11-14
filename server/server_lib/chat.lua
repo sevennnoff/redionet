@@ -9,18 +9,26 @@ local w,h = term.getSize()
 local monitor = peripheral.find("monitor")
 
 local orig_term = term.current()
-local log_window = monitor or window.create(orig_term, 1, 1, w, h-1) -- log to monitor if available or create sub window
+local term_window = window.create(orig_term, 1, 1, w, h-1)
 local cmd_window = window.create(orig_term, 1, h, w, 1)
-
+local log_window = monitor or term_window -- log to monitor if available, else sub window
 
 local M = {}
 
 settings.load()
 M.LOG_LEVEL = settings.get('redionet.log_level', 3)
 
-M.commands_list = {'reboot', 'reload', 'update', 'sync'}
+M.commands_list = {'help', 'reboot', 'reload', 'update', 'sync', }
 M.command_valid = {} -- Set
 for _,v in ipairs(M.commands_list) do M.command_valid[v] = true end
+
+local command_help = {
+    ['help']   = "Display this help message.",
+    ['reboot'] = "Reboot server+clients, may not auto resume.",
+    ['reload'] = "Attempt server+clients hot reload.",
+    ['update'] = "Fetch updates from GitHub and reload.",
+    ['sync']   = "Force resynchronize audio streams.",
+}
 
 M.term = log_window
 term.redirect(log_window)
@@ -39,6 +47,29 @@ function M.writeto(text, dst_term)
     write(text)
     term.redirect(prev_term)
     if prev_term.restoreCursor then prev_term.restoreCursor() end
+end
+
+function M.show_help()
+    local repo_url = "github.com/Rypo/redionet"
+    local orig_color = term_window.getTextColor()
+
+    -- display help in server terminal, even if monitor attached
+    term_window.setTextColor(colors.yellow)
+    M.writeto('rn commands\n', term_window)
+    for i = 1, #M.commands_list do -- index iter to preserve ordering
+        local name = M.commands_list[i]
+        local desc = command_help[name]
+
+        term_window.setTextColor(colors.lightGray)
+        M.writeto(name .. ": ", term_window)
+
+        term_window.setTextColor(colors.gray)
+        M.writeto(desc .. "\n", term_window)
+    end
+    term_window.setTextColor(colors.white)
+    M.writeto(("\nSource and more info\n> %s\n\n"):format(repo_url), term_window)
+
+    term_window.setTextColor(orig_color)
 end
 
 -- https://www.digminecraft.com/lists/color_list_pc.php
@@ -182,7 +213,6 @@ end
 local function command_line()
     local completion = require("cc.completion")
 
-    local cmd_opts = table.concat(M.commands_list, ',')
     local history = {}
 
     local input_active = false
@@ -242,7 +272,7 @@ local function command_line()
                     os.queueEvent('redionet:issue_command', cmd_name)
                 else
                     cmd_window.setTextColor(colors.red)
-                    cmd_window.write(("[ERR] rn `%s` | rn {%s}"):format(cmd_name, cmd_opts))
+                    cmd_window.write(("[ERR] rn `%s` \149 rn help - to show commands"):format(cmd_name))
                 end
             end
 
