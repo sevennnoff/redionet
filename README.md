@@ -61,15 +61,16 @@ At the moment, Pockets are limited to queue management (i.e., no audio) in the m
 
 ### Settings
 
-`redionet.log_level` - The lowest severity message to display on the Server screen. 
+`redionet.log_level` - The lowest severity message to display on the Server screen. \
 1=DEBUG, 2=INFO, 3=WARN, 4=ERROR (default=3).
 
 Non-user Settings (auto-assigned during installation) - `redionet.device_type` and `redionet.run_on_boot`. Do not manually change these - use the install script instead.
 
 ## Chat Commands
-- `rn reboot` - Reboots server+clients, will not auto start program unless run on startup selected during installation.
-- `rn reload` - Attempts to reload server+clients without shutting down. Less reliable than _rn reboot_ but doesn't require run on start. 
-- `rn update` - Pulls the latest code from GitHub and reloads.
+- `rn help`   - Prints each chat command with a brief description in the server terminal.  
+- `rn reboot` - Reboots server and all client computers. Server/client programs will not auto start unless run on startup is selected during installation.
+- `rn reload` - Attempts to reload server and all clients without shutting down. Less reliable than _rn reboot_ but doesn't require run on start. 
+- `rn update` - Pulls the latest code from GitHub and reloads if changes are detected.
 - `rn sync`   - Forces clients to resynchronize audio streams.
 
 ### Command Usage
