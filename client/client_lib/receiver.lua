@@ -8,7 +8,7 @@ local dfpwm = require("cc.audio.dfpwm")
 local speaker = peripheral.find("speaker")
 
 local MAX_QUEUE = 8
-local LATE_FLUSH_MS = 500
+local LATE_TOLERANCE_MS = 800
 
 local play_queue = {}
 local expected_chunk_id = 0
@@ -137,20 +137,16 @@ local function play_audio(buffer, state)
     end
 end
 
-local function wait_until_play_at(play_at_ms, stream_id)
-    if not play_at_ms then return true end
+local function wait_until_play_at(local_play_at, stream_id)
+    if not local_play_at then return true end
 
     while true do
         local now_ms = os.epoch("local")
-        if now_ms >= play_at_ms then
-            if now_ms - play_at_ms > LATE_FLUSH_MS then
-                speaker.stop()
-                decoder = dfpwm.make_decoder()
-            end
+        if now_ms >= local_play_at then
             return timeline_stream_id == nil or timeline_stream_id == stream_id
         end
 
-        local wait_sec = (play_at_ms - now_ms) / 1000
+        local wait_sec = (local_play_at - now_ms) / 1000
         local timer_id = os.startTimer(wait_sec)
         local proceed = true
         parallel.waitForAny(
@@ -195,16 +191,24 @@ local function enqueue_chunk(server_id, encoded, state)
     end
 
     if state.chunk_id ~= expected_chunk_id then
+        dbgmon(('chunk gap: expected %d got %d, resync'):format(expected_chunk_id, state.chunk_id))
+        rednet.send(server_id, "playback_desync", REDIONET_PROTO.AUDIO_NEXT)
         speaker.stop()
         decoder = dfpwm.make_decoder()
         expected_chunk_id = state.chunk_id
+    end
+
+    local recv_ms = os.epoch("local")
+    if state.play_at_ms and recv_ms > state.play_at_ms + LATE_TOLERANCE_MS then
+        dbgmon(('late chunk %d by %dms, resync'):format(state.chunk_id, recv_ms - state.play_at_ms))
+        rednet.send(server_id, "playback_desync", REDIONET_PROTO.AUDIO_NEXT)
     end
 
     while #play_queue >= MAX_QUEUE do
         os.sleep(0.05)
     end
 
-    table.insert(play_queue, { encoded = encoded, state = state })
+    table.insert(play_queue, { encoded = encoded, state = state, local_play_at = state.play_at_ms })
     expected_chunk_id = state.chunk_id + 1
     os.queueEvent("redionet:audio_queued")
 end
@@ -249,7 +253,7 @@ function M.receive_loop()
                         if CSTATE.is_paused or item.state.active_stream_id ~= item.state.song_id then
                             table.remove(play_queue, 1)
                         else
-                            if wait_until_play_at(item.state.play_at_ms, item.state.active_stream_id) then
+                            if wait_until_play_at(item.local_play_at, item.state.active_stream_id) then
                                 table.remove(play_queue, 1)
                                 if not CSTATE.is_paused and item.state.active_stream_id == item.state.song_id
                                     and (timeline_stream_id == nil or timeline_stream_id == item.state.active_stream_id) then

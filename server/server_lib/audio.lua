@@ -10,9 +10,10 @@ local chat = require('server_lib.chat')
 
 local AUDIO_CHUNK_SEC = 2.70 -- maximum tick multiple under 2.730666.. [(2^7 * 2^10) samples / 48000kHz]
 local TICK = 0.050
-local START_LEAD_MS = 900
-local RESYNC_LEAD_MS = 500
-local CHUNK_LEAD_MS = 250
+local START_LEAD_MS = 1200
+local RESYNC_LEAD_MS = 600
+local CHUNK_LEAD_MS = 450
+local LATE_TOLERANCE_MS = 800
 local PREFETCH_CHUNKS = 8
 local MAX_PIPELINE_MS = math.floor(PREFETCH_CHUNKS * AUDIO_CHUNK_SEC * 1000)
 local ACK_COLLECT_SEC = 0.05
@@ -227,6 +228,7 @@ local function transmit_audio(data_buffer)
         if not M.state.next_play_at_ms or M.state.next_play_at_ms < now_ms + CHUNK_LEAD_MS then
             M.state.next_play_at_ms = now_ms + CHUNK_LEAD_MS
         end
+        sub_state.sent_ms = now_ms
         sub_state.play_at_ms = M.state.next_play_at_ms
         M.state.next_play_at_ms = sub_state.play_at_ms + chunk_duration_ms(audio_chunk)
 
@@ -261,6 +263,9 @@ local function transmit_audio(data_buffer)
                         chat.log_message(string.format('#%d (%s, recv) | n=%d/%d', id,
                             ("%0.3f"):format(timestamp_ms / 1000):sub(-8),
                             play_state.num_active, play_state.n_receivers), "DEBUG")
+                    elseif msg == "playback_desync" then
+                        M.state.need_sync = true
+                        chat.log_message(('Client #%d requested resync'):format(id), "WARN")
                     elseif msg == "playback_stopped" then
                         play_state.n_receivers = play_state.n_receivers + 1
                         play_state.receiver_stats[id] = -1
