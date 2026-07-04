@@ -45,6 +45,7 @@ function M.update_server_state(blocking)
         local id, server_state = rednet.receive(REDIONET_PROTO.SERVER_STATE)
         CSTATE.server_state = server_state
         CSTATE.is_authorized = server_state.controller_id == CLIENT_ID
+        CSTATE.state_received_epoch_ms = os.epoch("local")
 
     else
         os.queueEvent('redionet:sync_state')

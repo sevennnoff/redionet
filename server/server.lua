@@ -70,15 +70,19 @@ STATE = {
 }
 
 
----broadcast server state data over the server state protocol
----@param caller_info? string origin debugging info to log
-local function broadcast_state(caller_info)
-    chat.log_message(('broadcast_state: %s'):format(caller_info), 'DEBUG')
+local function extrapolate_audio_position()
     if STATE.data.status == 1 and STATE.audio_position_epoch_ms then
         local elapsed_sec = (os.epoch("local") - STATE.audio_position_epoch_ms) / 1000
         STATE.data.audio_position_sec = math.max(0, STATE.data.audio_position_sec + elapsed_sec)
         STATE.audio_position_epoch_ms = os.epoch("local")
     end
+end
+
+---broadcast server state data over the server state protocol
+---@param caller_info? string origin debugging info to log
+local function broadcast_state(caller_info)
+    chat.log_message(('broadcast_state: %s'):format(caller_info), 'DEBUG')
+    extrapolate_audio_position()
     -- event data is always copied, client-side mutability not a concern
     rednet.broadcast(STATE.data, REDIONET_PROTO.SERVER_STATE)
 end
@@ -232,7 +236,9 @@ local function server_loop()
                 
                 if code then
                     if code == "STATE" then
-                        broadcast_state('SERVER_PLAYER: STATE')
+                        -- Unicast only to the requester; broadcasting on poll floods rednet during playback.
+                        extrapolate_audio_position()
+                        rednet.send(id, STATE.data, REDIONET_PROTO.SERVER_STATE)
                     elseif not auth.is_authorized(id) then
                         chat.log_message(("Rejected player command from unauthorized client #%d"):format(id), "WARN")
                         rednet.send(id, {"AUTH_REQUIRED", false}, REDIONET_PROTO.SERVER_REPLY)

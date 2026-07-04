@@ -23,11 +23,8 @@ M.state = {
     prefill_end = true,
 }
 
--- Keep enough audio queued in speakers to survive short server/rednet stalls,
--- but do not let one slow client hold the next chunk long enough to underrun everyone.
-local speaker_cache_target = AUDIO_CHUNK_SEC * 0.75
-local client_response_timeout = 0.85
-local first_response_timeout = AUDIO_CHUNK_SEC
+local speaker_cache_target = AUDIO_CHUNK_SEC/2 -- sec of audio stored in speakers at anytime. Higher = latency desync protection. Lower = reduced resync audio gaps
+local first_response_timeout = AUDIO_CHUNK_SEC -- failsafe if no client acknowledges a chunk
 
 local previous = {
     req_chunk_times = {},
@@ -214,7 +211,7 @@ local function transmit_audio(data_buffer)
         }
         for id,status in pairs(M.state.receiver_stats) do istate.receiver_stats[id] = status end
         
-        local timeout = client_response_timeout
+        local timeout = speaker_cache_target
         local timer, fallback_timer, tid
 
         parallel.waitForAny(

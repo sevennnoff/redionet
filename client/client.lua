@@ -43,6 +43,7 @@ CSTATE = {
     is_authorized = false,      -- true after this client enters the server control password
     is_controller = IS_CONTROLLER,
     error_status = false,       -- SEARCH_ERROR, false
+    state_received_epoch_ms = nil, -- used to extrapolate playback time between server polls
     server_state = {
         active_song_meta = nil,
         audio_position_sec = 0,
@@ -76,6 +77,20 @@ local function write_line(y, label, value, color)
     term.write(value)
 end
 
+local function current_display_position_sec()
+    local pos = CSTATE.server_state.audio_position_sec or 0
+    if CSTATE.server_state.status == 1 and CSTATE.state_received_epoch_ms then
+        pos = pos + (os.epoch("local") - CSTATE.state_received_epoch_ms) / 1000
+    end
+    return pos
+end
+
+local function apply_server_state(server_state)
+    CSTATE.server_state = server_state
+    CSTATE.state_received_epoch_ms = os.epoch("local")
+    CSTATE.is_authorized = server_state.controller_id == CLIENT_ID
+end
+
 local function draw_player_status()
     if IS_CONTROLLER then return end
 
@@ -104,7 +119,7 @@ local function draw_player_status()
     if song then
         write_line(11, "Track: ", song.name or "unknown")
         write_line(12, "Artist: ", song.artist or "unknown", colors.lightGray)
-        write_line(13, "Time: ", format_time(CSTATE.server_state.audio_position_sec))
+        write_line(13, "Time: ", format_time(current_display_position_sec()))
     else
         write_line(11, "Track: ", "none", colors.lightGray)
     end
@@ -214,8 +229,7 @@ local function client_loop()
             ]]
             function ()
                 local id, server_state = rednet.receive(REDIONET_PROTO.SERVER_STATE)
-                CSTATE.server_state = server_state
-                CSTATE.is_authorized = server_state.controller_id == CLIENT_ID
+                apply_server_state(server_state)
                 if IS_CONTROLLER then
                     os.queueEvent('redionet:redraw_screen')
                 else
@@ -271,6 +285,17 @@ local function client_loop()
 
                 while true do
                     os.sleep(1)
+                    draw_player_status()
+                end
+            end,
+
+            function ()
+                if IS_CONTROLLER then
+                    while true do os.pullEvent() end
+                end
+
+                while true do
+                    os.sleep(5)
                     os.queueEvent('redionet:sync_state')
                 end
             end
