@@ -323,9 +323,7 @@ function M.loop()
                                 end
                             end
                         elseif #chunks >= MIN_BUFFER_CHUNKS and not timeline_origin_ms and buffer_ready_sent_at then
-                            local waited = os.epoch("local") - buffer_ready_sent_at
-                            if waited > 2500 and not buffer_ready_sent then
-                                buffer_ready_sent = true
+                            if os.epoch("local") - buffer_ready_sent_at > 2500 then
                                 buffer_ready_sent_at = os.epoch("local")
                                 rednet.send(SERVER_ID, "buffer_ready", REDIONET_PROTO.AUDIO_NEXT)
                                 dbgmon("re-send buffer_ready (no timeline yet)")
