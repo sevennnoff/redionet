@@ -47,6 +47,61 @@ CSTATE = {
 local speaker = peripheral.find("speaker")
 local monitor = peripheral.find("monitor")
 
+local function format_time(seconds)
+    seconds = math.floor(seconds or 0)
+    return ("%d:%02d"):format(math.floor(seconds / 60), seconds % 60)
+end
+
+local function write_line(y, label, value, color)
+    term.setCursorPos(1, y)
+    term.clearLine()
+    term.setTextColor(colors.gray)
+    term.write(label)
+    term.setTextColor(color or colors.white)
+    term.write(value)
+end
+
+local function draw_player_status()
+    if IS_CONTROLLER then return end
+
+    term.setBackgroundColor(colors.black)
+    term.clear()
+
+    term.setCursorPos(1, 1)
+    term.setTextColor(colors.purple)
+    term.write("\15 Redionet")
+
+    term.setCursorPos(1, 2)
+    term.setTextColor(colors.lime)
+    term.write("Connection established")
+
+    write_line(4, "Client: ", ("#%d player"):format(CLIENT_ID))
+    write_line(5, "Server: ", SERVER_ID and ("#%d"):format(SERVER_ID) or "unknown")
+    write_line(6, "Speaker: ", peripheral.find("speaker") and "connected" or "missing", peripheral.find("speaker") and colors.lime or colors.orange)
+
+    local status = CSTATE.server_state.status
+    local status_text = status == 1 and "streaming" or status == 0 and "stopped" or "waiting"
+    local status_color = status == 1 and colors.lime or status == 0 and colors.red or colors.lightGray
+    write_line(8, "Server: ", status_text, status_color)
+    write_line(9, "Volume: ", ("%d%%"):format(math.floor(100 * ((CSTATE.server_state.volume or 0) / 3) + 0.5)))
+
+    local song = CSTATE.server_state.active_song_meta
+    if song then
+        write_line(11, "Track: ", song.name or "unknown")
+        write_line(12, "Artist: ", song.artist or "unknown", colors.lightGray)
+        write_line(13, "Time: ", format_time(CSTATE.server_state.audio_position_sec))
+    else
+        write_line(11, "Track: ", "none", colors.lightGray)
+    end
+
+    local err = CSTATE.server_state.error_status or CSTATE.error_status
+    if CSTATE.server_state.is_loading then
+        write_line(15, "State: ", "loading", colors.lightGray)
+    elseif err then
+        write_line(15, "Error: ", err, colors.red)
+    end
+end
+
 
 local function warn_speaker()
     -- Recent CC:tweaked versions may support two peripherals on pocket 
@@ -91,6 +146,7 @@ if not IS_CONTROLLER then
 end
 -- check speaker before connect to server to extend time warning visible
 local server_settings = setup_server_connection()
+draw_player_status()
 
 
 -- inherit client log level from server unless set locally
@@ -133,6 +189,8 @@ local function client_loop()
                 CSTATE.is_authorized = server_state.controller_id == CLIENT_ID
                 if IS_CONTROLLER then
                     os.queueEvent('redionet:redraw_screen')
+                else
+                    draw_player_status()
                 end
             end,
             
@@ -174,6 +232,13 @@ local function client_loop()
                 if speaker then
                     speaker.stop()
                     os.queueEvent("redionet:playback_stopped")
+                end
+            end,
+
+            function ()
+                while not IS_CONTROLLER do
+                    os.sleep(1)
+                    os.queueEvent('redionet:sync_state')
                 end
             end
         )
