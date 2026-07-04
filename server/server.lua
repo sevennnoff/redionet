@@ -83,6 +83,15 @@ local function broadcast_state(caller_info)
     rednet.broadcast(STATE.data, REDIONET_PROTO.SERVER_STATE)
 end
 
+local function broadcast_legacy_shutdown(reason)
+    chat.log_message(("legacy shutdown pulse: %s"):format(reason or "unknown"), "WARN")
+    for _ = 1, 3 do
+        rednet.broadcast("audio.stop_song", 'PROTO_AUDIO_HALT')
+        rednet.broadcast("reboot", 'PROTO_COMMAND')
+        os.sleep(0.35)
+    end
+end
+
 local function dump_state(filename)
     filename = filename or '.redionet.state'
     local state_str = textutils.serialize(STATE.data, {allow_repetitions = true})
@@ -136,6 +145,8 @@ local function server_loop()
     if #initial_clients > 0 then
         chat.writeto(('Known client IDs: <%s>\n'):format(table.concat(initial_clients, ',\t')))
     end
+
+    broadcast_legacy_shutdown("startup")
 
     settings.load()
     local rn_config = { -- redionet settings to pass to clients
@@ -279,6 +290,8 @@ local function server_event_loop()
                 elseif cmd == 'sync' then
                     -- need to be cautious about when sync occurs. If timing is off, it will *grow* the speaker buffer rather than clear it
                     audio.state.need_sync = true
+                elseif cmd == 'killlegacy' then
+                    os.queueEvent('redionet:killlegacy')
                 else
                     rednet.broadcast(cmd, REDIONET_PROTO.COMMAND)
                     os.queueEvent(('redionet:%s'):format(cmd))
@@ -289,6 +302,11 @@ local function server_event_loop()
                 os.pullEvent('redionet:sync') -- Queued by command `rn sync`
                 audio.state.speaker_cache = 0 -- stopping speakers wipes any buffered audio
                 rednet.broadcast('sync', REDIONET_PROTO.CLIENT_SYNC)
+            end,
+
+            function()
+                os.pullEvent('redionet:killlegacy')
+                broadcast_legacy_shutdown("manual")
             end,
 
             function ()

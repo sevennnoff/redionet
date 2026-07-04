@@ -82,6 +82,7 @@ Volume is server-wide. Changing it on the authorized Controller updates all conn
 - `rn reload` - Attempts to reload server and all clients without shutting down. Less reliable than _rn reboot_ but doesn't require run on start. 
 - `rn update` - Pulls the latest code from GitHub and reloads if changes are detected.
 - `rn sync`   - Forces clients to resynchronize audio streams.
+- `rn killlegacy` - Forces clients still on the old protocol set to reboot.
 
 ### Command Usage
 
