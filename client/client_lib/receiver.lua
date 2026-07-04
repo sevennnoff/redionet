@@ -8,6 +8,8 @@ local dfpwm = require("cc.audio.dfpwm")
 local speaker = peripheral.find("speaker")
 local decoder = dfpwm.make_decoder()
 local expected_chunk_id = nil
+local active_stream_id = nil
+local LATE_FLUSH_MS = 120
 
 
 local dbgmon = function (message) end
@@ -41,6 +43,8 @@ local M = {}
 
 local function reset_playback_cursor()
     expected_chunk_id = nil
+    active_stream_id = nil
+    decoder = dfpwm.make_decoder()
 end
 
 function M.update_server_state(blocking)
@@ -131,7 +135,6 @@ end
 
 local function decode_chunk(encoded)
     if type(encoded) == "table" then
-        -- backward compat: already decoded by older server builds
         return encoded
     end
     return decoder(encoded)
@@ -143,26 +146,32 @@ local function play_audio(encoded, state)
         return "playback_stopped"
     end
 
+    if active_stream_id ~= state.active_stream_id then
+        active_stream_id = state.active_stream_id
+        expected_chunk_id = state.chunk_id
+        decoder = dfpwm.make_decoder()
+    end
+
     if expected_chunk_id == nil then
         expected_chunk_id = state.chunk_id
     end
 
     if state.chunk_id < expected_chunk_id then
-        dbgmon(('DROP stale chunk %d (expected %d)'):format(state.chunk_id, expected_chunk_id))
-        return "chunk_skipped"
+        dbgmon(('DROP duplicate chunk %d (expected %d)'):format(state.chunk_id, expected_chunk_id))
+        return "request_next_chunk"
     end
 
     if state.chunk_id > expected_chunk_id then
-        dbgmon(('GAP flush at chunk %d (expected %d)'):format(state.chunk_id, expected_chunk_id))
+        dbgmon(('GAP reset at chunk %d (expected %d)'):format(state.chunk_id, expected_chunk_id))
         speaker.stop()
+        decoder = dfpwm.make_decoder()
         expected_chunk_id = state.chunk_id
     end
 
     local now_ms = os.epoch("local")
-    if state.stale_after_ms and now_ms > state.stale_after_ms then
-        dbgmon(('SKIP late chunk %d (%dms late)'):format(state.chunk_id, now_ms - state.stale_after_ms))
-        expected_chunk_id = state.chunk_id + 1
-        return "chunk_skipped"
+    if state.play_at_ms and now_ms > state.play_at_ms + LATE_FLUSH_MS then
+        dbgmon(('LATE flush chunk %d (%dms)'):format(state.chunk_id, now_ms - state.play_at_ms))
+        speaker.stop()
     end
 
     if not wait_until_play_at(state.play_at_ms, state) then

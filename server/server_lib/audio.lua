@@ -26,9 +26,9 @@ M.state = {
 
 local speaker_cache_target = AUDIO_CHUNK_SEC/2
 local first_response_timeout = AUDIO_CHUNK_SEC
-local PLAY_LEAD_MS = 600
-local SYNC_PLAY_LEAD_MS = 1000
-local STALE_PLAY_MS = 350 -- client skips chunk if play_at older than this
+local PLAY_LEAD_MS = 400
+local SYNC_PLAY_LEAD_MS = 800
+local LATE_FLUSH_MS = 120 -- flush speaker if chunk arrived this late (prevents doubling)
 
 local previous = {
     req_chunk_times = {},
@@ -166,15 +166,13 @@ local function schedule_chunk_play_at(sub_state, audio_dur_sec, sync_point)
     local now_ms = os.epoch("local")
     local lead_ms = sync_point and SYNC_PLAY_LEAD_MS or PLAY_LEAD_MS
 
-    if not M.state.next_play_at_ms or sync_point then
+    if sync_point or not M.state.next_play_at_ms then
         M.state.next_play_at_ms = now_ms + lead_ms
-    elseif M.state.next_play_at_ms < now_ms then
-        -- network or client lag pushed us behind; slip forward without flushing speakers
-        M.state.next_play_at_ms = now_ms + lead_ms
+    else
+        M.state.next_play_at_ms = math.max(M.state.next_play_at_ms, now_ms + lead_ms)
     end
 
     sub_state.play_at_ms = M.state.next_play_at_ms
-    sub_state.stale_after_ms = M.state.next_play_at_ms + STALE_PLAY_MS
     M.state.next_play_at_ms = M.state.next_play_at_ms + math.floor(audio_dur_sec * 1000)
 end
 
@@ -197,7 +195,6 @@ local function transmit_audio(data_buffer)
         -- audio_dur_sec = audio_dur_sec,
         audio_position_sec = previous.audio_position_sec,
     }
-    schedule_chunk_play_at(sub_state, audio_dur_sec, M.state.need_sync or sub_state.chunk_id == 1)
     previous.audio_position_sec = previous.audio_position_sec + audio_dur_sec
     STATE.data.audio_position_sec = sub_state.audio_position_sec
     STATE.audio_position_epoch_ms = os.epoch("local")
@@ -220,6 +217,8 @@ local function transmit_audio(data_buffer)
 
     
 
+    local sync_point = M.state.need_sync or sub_state.chunk_id == 1
+
     local function timed_play_task()
         local istate = {
             n_receivers = M.state.n_receivers,
@@ -228,7 +227,9 @@ local function transmit_audio(data_buffer)
         }
         for id,status in pairs(M.state.receiver_stats) do istate.receiver_stats[id] = status end
 
-        local timeout = speaker_cache_target
+        schedule_chunk_play_at(sub_state, audio_dur_sec, sync_point)
+
+        local timeout = AUDIO_CHUNK_SEC
         local timer, fallback_timer, tid
 
         local function all_receivers_replied()
@@ -270,7 +271,7 @@ local function transmit_audio(data_buffer)
                             ("%0.3f"):format(timestamp_ms/1000):sub(-8),
                             play_state.num_active, play_state.n_receivers, sub_state.chunk_id), "DEBUG")
                         previous.req_chunk_times[id] = timestamp_ms
-                    elseif msg == "playback_stopped" or msg == "chunk_skipped" then
+                    elseif msg == "playback_stopped" then
                         play_state.n_receivers = play_state.n_receivers + 1
                         play_state.receiver_stats[id] = -1
                     elseif msg == "playback_interrupted" then
