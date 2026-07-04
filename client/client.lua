@@ -132,6 +132,8 @@ local function setup_server_connection()
                 if payload then
                     code, server_settings = table.unpack(payload)
                 end
+            else
+                os.sleep(0.5)
             end
         until code == "CONFIG"
     end)
