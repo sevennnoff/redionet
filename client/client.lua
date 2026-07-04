@@ -250,7 +250,11 @@ local function client_loop()
             end,
 
             function ()
-                while not IS_CONTROLLER do
+                if IS_CONTROLLER then
+                    while true do os.pullEvent("redionet:player_status_tick") end
+                end
+
+                while true do
                     os.sleep(1)
                     os.queueEvent('redionet:sync_state')
                 end
