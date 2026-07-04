@@ -254,6 +254,7 @@ local function server_loop()
                         os.queueEvent('redionet:broadcast_state', "SERVER_PLAYER: VOLUME")
                     elseif code == "SYNC" then
                         audio.state.need_sync = true
+                        os.queueEvent('redionet:sync')
                         os.queueEvent('redionet:broadcast_state', "SERVER_PLAYER: SYNC")
                     end
                 end
@@ -295,6 +296,7 @@ local function server_event_loop()
                     chat.show_help()
                 elseif cmd == 'sync' then
                     audio.state.need_sync = true
+                    os.queueEvent('redionet:sync')
                 elseif cmd == 'killlegacy' then
                     os.queueEvent('redionet:killlegacy')
                 else
@@ -305,8 +307,10 @@ local function server_event_loop()
 
             function()
                 os.pullEvent('redionet:sync')
-                -- Idle only: flush client speakers. During playback, need_sync resyncs on the next chunk boundary.
-                if not STATE.active_stream_id then
+                if STATE.active_stream_id then
+                    audio.arm_timeline(false)
+                    audio.state.need_sync = false
+                else
                     rednet.broadcast({ kind = "sync" }, REDIONET_PROTO.CLIENT_SYNC)
                 end
             end,
