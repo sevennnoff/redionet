@@ -165,7 +165,7 @@ local function wait_speakers(max_wait, eps)
 end
 
 
---  broadcasts the decoded audio buffer data over PROTO_AUDIO
+--  broadcasts the decoded audio buffer data over the audio protocol
 local function transmit_audio(data_buffer)
      -- NOTE: logging via os.queueEvent("redionet:log_message") saturates event queue, keep sync
     local audio_chunk = data_buffer:next()
@@ -221,10 +221,10 @@ local function transmit_audio(data_buffer)
             function ()
                 -- local transmissions = {}
                 -- for id, _ in pairs(M.state.receiver_stats) do
-                --     table.insert(transmissions, function () rednet.send(id, {buffer, sub_state}, 'PROTO_AUDIO') end)
+                --     table.insert(transmissions, function () rednet.send(id, {buffer, sub_state}, REDIONET_PROTO.AUDIO) end)
                 -- end
                 -- parallel.waitForAll(table.unpack(transmissions))
-                rednet.broadcast({audio_chunk, sub_state}, 'PROTO_AUDIO')
+                rednet.broadcast({audio_chunk, sub_state}, REDIONET_PROTO.AUDIO)
                 -- time_audio_sent = os.epoch("ingame")
                 time_audio_sent = os.epoch("local")
                 fallback_timer = os.startTimer(first_response_timeout)
@@ -233,7 +233,7 @@ local function transmit_audio(data_buffer)
             end,
             function ()
                 repeat
-                    local id,msg = rednet.receive("PROTO_AUDIO_NEXT")
+                    local id,msg = rednet.receive(REDIONET_PROTO.AUDIO_NEXT)
                     -- IMPORTANT: Start shared timer only *After first client responds*. 
                     -- the server compensates for lag spikes with temporary tick acceleration, filling up speakers buffers, causing all to timeout.
                     -- NOTE: If all clients fail to respond, it will run forever. TODO: (failsafe timeout?) 
@@ -319,7 +319,7 @@ local function transmit_audio(data_buffer)
 
     local ok, err = pcall(parallel.waitForAll, timed_play_task, function () if not M.state.prefill_end then data_buffer:read_n(2) end end)
 
-    -- PROTO_AUDIO_HALT makes all clients not request_next_chunk, thus #rep_ids=0. Only warn if server has active song. 
+    -- AUDIO_HALT makes all clients not request_next_chunk, thus #rep_ids=0. Only warn if server has active song. 
     -- Noteably, audio.stop_song broadcasts halt. stop_song is also called when a song is skipped, or play now clicked.
     if #reply.ids == 0 and STATE.active_stream_id ~= nil then
         chat.log_message('No remaining listeners... Stopping', 'WARN')
@@ -460,7 +460,7 @@ function M.play_song(song_meta)
 end
 
 function M.stop_song()
-    rednet.broadcast("audio.stop_song", 'PROTO_AUDIO_HALT')
+    rednet.broadcast("audio.stop_song", REDIONET_PROTO.AUDIO_HALT)
     os.queueEvent("redionet:playback_stopped") -- pulled by process_audio_data
     STATE.active_stream_id = nil
     STATE.data.status = 0
@@ -486,7 +486,7 @@ function M.audio_loop()
     parallel.waitForAny(
         function ()
             while true do
-                local id, status = rednet.receive('PROTO_AUDIO_CONNECTION')
+                local id, status = rednet.receive(REDIONET_PROTO.AUDIO_CONNECTION)
 
                 if status == -1 then -- special case for speakerless device. Allows sync on toggle Quit/Join, but doesn't add to known receivers.
                     M.state.need_sync = true
@@ -540,7 +540,7 @@ function M.audio_loop()
                         -- debug.debug()
                         -- This will always execute if queued properly and should_play==true, but keep as safety check to avoid re-downloading an actively streaming song
                         if should_play and not has_correct_stream then
-                            rednet.broadcast('status', 'PROTO_AUDIO_STATUS') -- trigger status update
+                            rednet.broadcast('status', REDIONET_PROTO.AUDIO_STATUS) -- trigger status update
                             network.download_song(STATE.data.active_song_meta.id)
                         end
                         

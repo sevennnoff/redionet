@@ -8,7 +8,23 @@ if not rednet.isOpen() then error("Failed to establish rednet connection. Attach
 
 SERVER_ID = os.getComputerID()
 -- note: _could_ support multi-server where clients choose "station" via ID..but seems more trouble than it's worth
-rednet.host('PROTO_SERVER', 'server')
+REDIONET_PROTO = {
+    SERVER = 'RDN:SERVER:v5',
+    SERVER_REPLY = 'RDN:SERVER_REPLY:v5',
+    SERVER_STATE = 'RDN:SERVER_STATE:v5',
+    SERVER_QUEUE = 'RDN:SERVER_QUEUE:v5',
+    SERVER_PLAYER = 'RDN:SERVER_PLAYER:v5',
+    SERVER_UPDATED = 'RDN:SERVER_UPDATED:v5',
+    AUDIO = 'RDN:AUDIO:v5',
+    AUDIO_CONNECTION = 'RDN:AUDIO_CONNECTION:v5',
+    AUDIO_NEXT = 'RDN:AUDIO_NEXT:v5',
+    AUDIO_HALT = 'RDN:AUDIO_HALT:v5',
+    AUDIO_STATUS = 'RDN:AUDIO_STATUS:v5',
+    CLIENT_SYNC = 'RDN:CLIENT_SYNC:v5',
+    COMMAND = 'RDN:COMMAND:v5',
+    CHATBOX = 'RDN:CHATBOX:v5',
+}
+rednet.host(REDIONET_PROTO.SERVER, 'server')
 
 local original_term = term.current() -- chat module will redirect term to designated windows. Store it now for reset on reload
 
@@ -54,7 +70,7 @@ STATE = {
 }
 
 
----broadcast server state data over PROTO_SERVER_STATE protocol
+---broadcast server state data over the server state protocol
 ---@param caller_info? string origin debugging info to log
 local function broadcast_state(caller_info)
     chat.log_message(('broadcast_state: %s'):format(caller_info), 'DEBUG')
@@ -64,7 +80,7 @@ local function broadcast_state(caller_info)
         STATE.audio_position_epoch_ms = os.epoch("local")
     end
     -- event data is always copied, client-side mutability not a concern
-    rednet.broadcast(STATE.data, 'PROTO_SERVER_STATE')
+    rednet.broadcast(STATE.data, REDIONET_PROTO.SERVER_STATE)
 end
 
 local function dump_state(filename)
@@ -116,7 +132,7 @@ local function server_loop()
     if auth.state.generated_password then
         chat.writeto(('[AUTH] Control password: %s\n'):format(auth.state.generated_password))
     end
-    local initial_clients = { rednet.lookup('PROTO_AUDIO') }
+    local initial_clients = { rednet.lookup(REDIONET_PROTO.AUDIO) }
     if #initial_clients > 0 then
         chat.writeto(('Known client IDs: <%s>\n'):format(table.concat(initial_clients, ',\t')))
     end
@@ -134,7 +150,7 @@ local function server_loop()
         parallel.waitForAny(
             function()
                 while true do
-                    id, message = rednet.receive('PROTO_SERVER') -- General utilities
+                    id, message = rednet.receive(REDIONET_PROTO.SERVER) -- General utilities
                     local code, payload
                     if type(message) == "table" then
                         code, payload = table.unpack(message)
@@ -143,28 +159,28 @@ local function server_loop()
                     end
 
                     if code == "CONFIG" then
-                        rednet.send(id, {code, rn_config}, 'PROTO_SERVER:REPLY')
+                        rednet.send(id, {code, rn_config}, REDIONET_PROTO.SERVER_REPLY)
                     elseif code == "AUTH" then
                         local ok = auth.verify(id, payload)
                         STATE.data.controller_id = auth.get_controller()
-                        rednet.send(id, {code, ok}, 'PROTO_SERVER:REPLY')
-                        os.queueEvent('redionet:broadcast_state', "PROTO_SERVER: AUTH")
+                        rednet.send(id, {code, ok}, REDIONET_PROTO.SERVER_REPLY)
+                        os.queueEvent('redionet:broadcast_state', "SERVER: AUTH")
                         chat.log_message(("Client #%d %s control auth"):format(id, ok and "passed" or "failed"), ok and "INFO" or "WARN")
                     elseif code == "PING" then
-                        rednet.send(id, {code, "PONG"}, 'PROTO_SERVER:REPLY')
+                        rednet.send(id, {code, "PONG"}, REDIONET_PROTO.SERVER_REPLY)
                     elseif code == "LOG" then
                         chat.log_message(payload, "INFO")
                     end
                 end
             end,
-            -- TODO: PROTO_SERVER_QUEUE / PROTO_SERVER_PLAYER - race condition possible?
+            -- TODO: queue / player paths can still race under heavy load.
             function()
-                id, message = rednet.receive('PROTO_SERVER_QUEUE') -- Song queue management
+                id, message = rednet.receive(REDIONET_PROTO.SERVER_QUEUE) -- Song queue management
                 local code, payload = table.unpack(message)
 
                 if not auth.is_authorized(id) then
                     chat.log_message(("Rejected queue command from unauthorized client #%d"):format(id), "WARN")
-                    rednet.send(id, {"AUTH_REQUIRED", false}, 'PROTO_SERVER:REPLY')
+                    rednet.send(id, {"AUTH_REQUIRED", false}, REDIONET_PROTO.SERVER_REPLY)
                     return
                 end
 
@@ -196,39 +212,39 @@ local function server_loop()
                     os.queueEvent('redionet:fetch_audio') -- TODO: monitor for interaction with Play Now
                 end
 
-                os.queueEvent('redionet:broadcast_state', "PROTO_SERVER_QUEUE: " .. tostring(code))
+                os.queueEvent('redionet:broadcast_state', "SERVER_QUEUE: " .. tostring(code))
             end,
 
             function()
-                id, message = rednet.receive('PROTO_SERVER_PLAYER') -- server playback state management 
+                id, message = rednet.receive(REDIONET_PROTO.SERVER_PLAYER) -- server playback state management 
                 local code, payload = table.unpack(message)
                 
                 if code then
                     if code == "STATE" then
-                        broadcast_state('PROTO__PLAYER: STATE')
+                        broadcast_state('SERVER_PLAYER: STATE')
                     elseif not auth.is_authorized(id) then
                         chat.log_message(("Rejected player command from unauthorized client #%d"):format(id), "WARN")
-                        rednet.send(id, {"AUTH_REQUIRED", false}, 'PROTO_SERVER:REPLY')
+                        rednet.send(id, {"AUTH_REQUIRED", false}, REDIONET_PROTO.SERVER_REPLY)
                     elseif code == "TOGGLE" then
                         audio.toggle_play_pause()
                     elseif code == "SKIP" then
                         audio.skip_song()
                     elseif code == "LOOP" then
                         STATE.data.loop_mode = payload
-                        os.queueEvent('redionet:broadcast_state', "PROTO_SERVER_PLAYER: LOOP")
+                        os.queueEvent('redionet:broadcast_state', "SERVER_PLAYER: LOOP")
                     elseif code == "VOLUME" then
                         STATE.data.volume = math.max(0, math.min(3, tonumber(payload) or STATE.data.volume))
-                        os.queueEvent('redionet:broadcast_state', "PROTO_SERVER_PLAYER: VOLUME")
+                        os.queueEvent('redionet:broadcast_state', "SERVER_PLAYER: VOLUME")
                     elseif code == "SYNC" then
                         audio.state.need_sync = true
-                        os.queueEvent('redionet:broadcast_state', "PROTO_SERVER_PLAYER: SYNC")
+                        os.queueEvent('redionet:broadcast_state', "SERVER_PLAYER: SYNC")
                     end
                 end
             end,
             
             -- Misc Client Communication
             function ()
-                local cid, client_file_changes = rednet.receive('PROTO_UPDATED')
+                local cid, client_file_changes = rednet.receive(REDIONET_PROTO.SERVER_UPDATED)
                 local prev_color = term.getTextColor()
 
                 if client_file_changes then
@@ -264,7 +280,7 @@ local function server_event_loop()
                     -- need to be cautious about when sync occurs. If timing is off, it will *grow* the speaker buffer rather than clear it
                     audio.state.need_sync = true
                 else
-                    rednet.broadcast(cmd, 'PROTO_COMMAND')
+                    rednet.broadcast(cmd, REDIONET_PROTO.COMMAND)
                     os.queueEvent(('redionet:%s'):format(cmd))
                 end
             end,
@@ -272,7 +288,7 @@ local function server_event_loop()
             function()
                 os.pullEvent('redionet:sync') -- Queued by command `rn sync`
                 audio.state.speaker_cache = 0 -- stopping speakers wipes any buffered audio
-                rednet.broadcast('sync', 'PROTO_CLIENT_SYNC')
+                rednet.broadcast('sync', REDIONET_PROTO.CLIENT_SYNC)
             end,
 
             function ()

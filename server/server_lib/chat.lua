@@ -298,7 +298,7 @@ function M.chat_loop()
             
             function ()
                 -- access chatBox specific behavior without Advanced Peripherals mod
-                local id, message = rednet.receive('PROTO_CHATBOX')
+                local id, message = rednet.receive(REDIONET_PROTO.CHATBOX)
                 if not M.authorize_rednet_chatbox(id) then
                     M.log_message(("Rejected chat command bridge from unauthorized client #%d"):format(id), "WARN")
                     return
@@ -310,7 +310,7 @@ function M.chat_loop()
             end,
 
             function()
-                -- fires if a real (Advanced Peripherals) chatBox is attached or imitated with PROTO_CHATBOX
+                -- fires if a real (Advanced Peripherals) chatBox is attached or imitated with CHATBOX
                 local ev, user, message, uuid, ishidden = os.pullEvent("chat")
                 message = string.lower(message)
                 local cmd = message:match("rn (%l+)") -- match format: "rn lowercaseletters"

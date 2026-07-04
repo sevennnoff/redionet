@@ -91,10 +91,10 @@ Volume is server-wide. Changing it on the authorized Controller updates all conn
 **Without AP mod**, there are two alternative ways to use commands.
 1. If you're next to the server computer, type the command into the server's built-in `CMD>` line.
    
-2. From the currently authorized Controller computer, open the `lua` repl, and send the command over the `PROTO_CHATBOX` rednet protocol, e.g.
+2. From the currently authorized Controller computer, open the `lua` repl, and send the command over the `RDN:CHATBOX:v5` rednet protocol, e.g.
     ```lua
     peripheral.find("modem", rednet.open)
-    rednet.broadcast("rn update", "PROTO_CHATBOX")
+    rednet.broadcast("rn update", "RDN:CHATBOX:v5")
     ```
 
 ## Known Limitations
