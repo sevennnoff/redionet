@@ -283,20 +283,17 @@ local function client_loop()
                     while true do os.pullEvent("redionet:player_status_tick") end
                 end
 
+                -- Player clients: only refresh the time line locally; no rednet polling during playback.
                 while true do
                     os.sleep(1)
-                    draw_player_status()
-                end
-            end,
-
-            function ()
-                if IS_CONTROLLER then
-                    while true do os.pullEvent() end
-                end
-
-                while true do
-                    os.sleep(5)
-                    os.queueEvent('redionet:sync_state')
+                    if CSTATE.server_state.active_song_meta and CSTATE.server_state.status == 1 then
+                        term.setCursorPos(1, 13)
+                        term.clearLine()
+                        term.setTextColor(colors.gray)
+                        term.write("Time: ")
+                        term.setTextColor(colors.white)
+                        term.write(format_time(current_display_position_sec()))
+                    end
                 end
             end
         )

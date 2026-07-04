@@ -13,7 +13,7 @@ local prog_args = { ... }
 
 
 local BASE_URL = "https://raw.githubusercontent.com/sevennnoff/redionet/refs/heads/main/"
-local INSTALL_VERSION = "2026-07-04-connection-hotfix"
+local INSTALL_VERSION = "2026-07-04-sync-hotfix"
 
 local filemap = {}
 
@@ -522,11 +522,6 @@ local function update(device_type)
         end
     end
 
-    if device_type == "server" then
-        setup_server_password()
-        files_updated = true
-    end
-
     return files_updated
 end
 
@@ -552,10 +547,10 @@ local function main()
     local device_type = settings.get('redionet.device_type')
 
     local file_changes = true
-    if flags.update and device_type and not flags.force then
-        file_changes = update(device_type)
-    else
+    if flags.force or not device_type then
         fresh_install()
+    else
+        file_changes = update(device_type)
     end
 
     os.queueEvent('redionet:update_complete', file_changes)

@@ -211,8 +211,17 @@ local function transmit_audio(data_buffer)
         }
         for id,status in pairs(M.state.receiver_stats) do istate.receiver_stats[id] = status end
         
-        local timeout = speaker_cache_target
+        local timeout = AUDIO_CHUNK_SEC
         local timer, fallback_timer, tid
+
+        local function all_receivers_replied()
+            for id, _ in pairs(istate.receiver_stats) do
+                if play_state.receiver_stats[id] == nil then
+                    return false
+                end
+            end
+            return true
+        end
 
         parallel.waitForAny(
             function ()
@@ -243,11 +252,11 @@ local function transmit_audio(data_buffer)
                         chat.log_message(('First responce: %0.3fs'):format(first_responce_sec), "DEBUG")
                     end
                     
-                    play_state.n_receivers = play_state.n_receivers + 1 -- count all valid responses, stopped or next
-
-                    if msg == "request_next_chunk" then
+                    if play_state.receiver_stats[id] ~= nil then
+                        -- ignore duplicate acks from the same client
+                    elseif msg == "request_next_chunk" then
+                        play_state.n_receivers = play_state.n_receivers + 1
                         local timestamp_ms = os.epoch("local")
-                        -- local timestamp_ms = os.epoch("ingame")
                         play_state.receiver_stats[id] = 1
                         play_state.num_active = play_state.num_active + 1
 
@@ -257,16 +266,16 @@ local function transmit_audio(data_buffer)
 
                         chat.log_message(string.format('#%d (%s, %dms) | n=%d/%d', id,
                             ("%0.3f"):format(timestamp_ms/1000):sub(-8), play_duration,
-                            -- ("%0.2f"):format(timestamp_ms/(Gms*1000)):sub(-7), play_duration/Gms, -- ("%0.3f"):format(timestamp_ms/1000):sub(7)
                             play_state.num_active, play_state.n_receivers ), "DEBUG")
 
                         previous.req_chunk_times[id] = timestamp_ms
                     elseif msg == "playback_stopped" then
+                        play_state.n_receivers = play_state.n_receivers + 1
                         play_state.receiver_stats[id] = -1
                     elseif msg == "playback_interrupted" then
                         break -- make no assumptions, just break out to avoid updating state inadvertently. This msg means audio would stop anyway.
                     end
-                until play_state.n_receivers >= istate.n_receivers -- weak check. Doesn't care who replied, only number received
+                until all_receivers_replied()
             end,
 
             function ()

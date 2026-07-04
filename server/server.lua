@@ -254,6 +254,8 @@ local function server_loop()
                         os.queueEvent('redionet:broadcast_state', "SERVER_PLAYER: VOLUME")
                     elseif code == "SYNC" then
                         audio.state.need_sync = true
+                        audio.state.speaker_cache = 0
+                        os.queueEvent('redionet:sync')
                         os.queueEvent('redionet:broadcast_state', "SERVER_PLAYER: SYNC")
                     end
                 end
@@ -294,8 +296,9 @@ local function server_event_loop()
                     -- TODO: bypass issue_command, keep all help display logic in chat module 
                     chat.show_help()
                 elseif cmd == 'sync' then
-                    -- need to be cautious about when sync occurs. If timing is off, it will *grow* the speaker buffer rather than clear it
                     audio.state.need_sync = true
+                    audio.state.speaker_cache = 0
+                    os.queueEvent('redionet:sync')
                 elseif cmd == 'killlegacy' then
                     os.queueEvent('redionet:killlegacy')
                 else
