@@ -21,10 +21,15 @@ M.state = {
     need_sync = false,
     speaker_cache = 0.0, -- seconds
     prefill_end = true,
+    next_play_at_ms = nil, -- shared wall-clock timeline for all clients
 }
 
 local speaker_cache_target = AUDIO_CHUNK_SEC/2 -- sec of audio stored in speakers at anytime. Higher = latency desync protection. Lower = reduced resync audio gaps
 local first_response_timeout = AUDIO_CHUNK_SEC -- failsafe if no client acknowledges a chunk
+local PLAY_LEAD_MS = 400 -- min lead before all clients start a chunk
+local SYNC_PLAY_LEAD_MS = 800 -- extra lead after join / hard sync / new song
+local SOFT_REALIGN_DESYNC_MS = 900 -- slip timeline instead of stopping speakers
+local HARD_SYNC_DESYNC_MS = 2200
 
 local previous = {
     req_chunk_times = {},
@@ -161,6 +166,21 @@ local function wait_speakers(max_wait, eps)
     os.cancelTimer(timer_max)
 end
 
+local function schedule_chunk_play_at(sub_state, audio_dur_sec, sync_point)
+    local now_ms = os.epoch("local")
+    local lead_ms = sync_point and SYNC_PLAY_LEAD_MS or PLAY_LEAD_MS
+
+    if not M.state.next_play_at_ms or sync_point then
+        M.state.next_play_at_ms = now_ms + lead_ms
+    elseif M.state.next_play_at_ms < now_ms then
+        -- network or client lag pushed us behind; slip forward without flushing speakers
+        M.state.next_play_at_ms = now_ms + lead_ms
+    end
+
+    sub_state.play_at_ms = M.state.next_play_at_ms
+    M.state.next_play_at_ms = M.state.next_play_at_ms + math.floor(audio_dur_sec * 1000)
+end
+
 
 --  broadcasts the decoded audio buffer data over the audio protocol
 local function transmit_audio(data_buffer)
@@ -180,6 +200,7 @@ local function transmit_audio(data_buffer)
         -- audio_dur_sec = audio_dur_sec,
         audio_position_sec = previous.audio_position_sec,
     }
+    schedule_chunk_play_at(sub_state, audio_dur_sec, M.state.need_sync or sub_state.chunk_id == 1)
     previous.audio_position_sec = previous.audio_position_sec + audio_dur_sec
     STATE.data.audio_position_sec = sub_state.audio_position_sec
     STATE.audio_position_epoch_ms = os.epoch("local")
@@ -336,16 +357,22 @@ local function transmit_audio(data_buffer)
         local desync_ms = (math.max(table.unpack(reply.times)) - math.min(table.unpack(reply.times)))--/Gms
         chat.log_message(string.format('max client desync: %dms | n=%d/%d', desync_ms, #reply.times, play_state.n_receivers), "INFO")
 
-        if desync_ms > 1000 then -- more than 1000ms lag time, warn and resync
-            chat.log_message('Detected client desync. Forcing sync..', "WARN")
-            
+        if desync_ms > SOFT_REALIGN_DESYNC_MS then
             local id_order, delay = {'ID:'}, {'LAG'}
             for i,id in ipairs(reply.ids) do
-                id_order[i+1] = ("%d"):format(id) -- ensure str, tabulate will get confused
-                delay[i+1] = ("%dms"):format(((i < #reply.times and reply.times[i+1] - reply.times[i]) or 0))--/Gms)
+                id_order[i+1] = ("%d"):format(id)
+                delay[i+1] = ("%dms"):format(((i < #reply.times and reply.times[i+1] - reply.times[i]) or 0))
             end
-            textutils.tabulate(colors.white, id_order, colors.pink, delay)
-            os.queueEvent('redionet:sync')
+
+            if desync_ms >= HARD_SYNC_DESYNC_MS then
+                chat.log_message('Detected client desync. Hard sync..', "WARN")
+                textutils.tabulate(colors.white, id_order, colors.pink, delay)
+                os.queueEvent('redionet:sync')
+                M.state.next_play_at_ms = nil
+            else
+                chat.log_message(('Detected client desync (%dms). Realigning timeline..'):format(desync_ms), "WARN")
+                M.state.next_play_at_ms = os.epoch("local") + SYNC_PLAY_LEAD_MS
+            end
         end
     end
 
@@ -391,6 +418,7 @@ local function process_audio_data(data_buffer)
     M.state.speaker_cache = 0
     M.state.need_sync = true -- always sync on new song
     M.state.prefill_end = true
+    M.state.next_play_at_ms = nil
 
     previous = {
         req_chunk_times = {},
