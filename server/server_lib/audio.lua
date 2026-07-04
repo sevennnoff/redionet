@@ -19,16 +19,12 @@ M.state = {
     num_active = 0,
     n_receivers = 0,
     need_sync = false,
-    speaker_cache = 0.0, -- seconds buffered in client speakers (pacing)
+    speaker_cache = 0.0, -- seconds
     prefill_end = true,
-    next_play_at_ms = nil, -- shared wall-clock play timeline
 }
 
-local speaker_cache_target = AUDIO_CHUNK_SEC/2
+local speaker_cache_target = AUDIO_CHUNK_SEC/2 -- sec of audio stored in speakers at anytime. Higher = latency desync protection. Lower = reduced resync audio gaps
 local first_response_timeout = AUDIO_CHUNK_SEC
-local PLAY_LEAD_MS = 400
-local SYNC_PLAY_LEAD_MS = 800
-local LATE_FLUSH_MS = 120 -- flush speaker if chunk arrived this late (prevents doubling)
 
 local previous = {
     req_chunk_times = {},
@@ -60,6 +56,7 @@ function Buffer.new(handle, song_meta)
     }
     
     self.buffer = {}
+    self.decoder = dfpwm.make_decoder()
     self.audio_total_sec = self.song_meta.duration.H*3600 + self.song_meta.duration.M*60 + self.song_meta.duration.S
     self.audio_total_chunks = math.ceil(self.audio_total_sec / AUDIO_CHUNK_SEC)
     -- for i = 1, self.size, self.chunk_size do
@@ -113,8 +110,14 @@ function Buffer.new(handle, song_meta)
 
         local dsz = #data -- encoded length
 
-        -- Transmit encoded DFPWM over rednet (~16 KiB) instead of decoded samples (~512 KiB).
-        table.insert(self.buffer, data)
+        -- table.insert(self.buffer, data)
+        table.insert(self.buffer, self.decoder(data))
+        --[[
+        Preliminary testing shows desynchronization issues worsen when decoding is done
+        by the client. Server decode, cache, transmit seems to be the best approach.
+        For posterity, it's worth noting the main downside is larger rednet transmissions.
+        The decoded message is a table of 131k ints compared to encoded 16k chars. 
+        ]]
         
         self.total_read.chunks = self.total_read.chunks + 1
         self.total_read.bytes = self.total_read.bytes + dsz
@@ -158,26 +161,8 @@ local function wait_speakers(max_wait, eps)
     os.cancelTimer(timer_max)
 end
 
-local function encoded_chunk_duration_sec(encoded)
-    return (#encoded * 8) / 48000
-end
 
-local function schedule_chunk_play_at(sub_state, audio_dur_sec, sync_point)
-    local now_ms = os.epoch("local")
-    local lead_ms = sync_point and SYNC_PLAY_LEAD_MS or PLAY_LEAD_MS
-
-    if sync_point or not M.state.next_play_at_ms then
-        M.state.next_play_at_ms = now_ms + lead_ms
-    else
-        M.state.next_play_at_ms = math.max(M.state.next_play_at_ms, now_ms + lead_ms)
-    end
-
-    sub_state.play_at_ms = M.state.next_play_at_ms
-    M.state.next_play_at_ms = M.state.next_play_at_ms + math.floor(audio_dur_sec * 1000)
-end
-
-
---  broadcasts encoded audio over rednet; clients decode locally
+--  broadcasts the decoded audio buffer data over the audio protocol
 local function transmit_audio(data_buffer)
      -- NOTE: logging via os.queueEvent("redionet:log_message") saturates event queue, keep sync
     local audio_chunk = data_buffer:next()
@@ -186,7 +171,7 @@ local function transmit_audio(data_buffer)
         return
     end
 
-    local audio_dur_sec = encoded_chunk_duration_sec(audio_chunk)
+    local audio_dur_sec = (#audio_chunk/48000)
 
     local sub_state = {
         active_stream_id = STATE.active_stream_id, -- this is the only place we give clients access to active_stream_id
@@ -217,19 +202,16 @@ local function transmit_audio(data_buffer)
 
     
 
-    local sync_point = M.state.need_sync or sub_state.chunk_id == 1
-
     local function timed_play_task()
+        -- copy initial, pre-broadcast state or changes while yielding may cause unexpected behavior
         local istate = {
             n_receivers = M.state.n_receivers,
             num_active = M.state.num_active,
             receiver_stats = {},
         }
         for id,status in pairs(M.state.receiver_stats) do istate.receiver_stats[id] = status end
-
-        schedule_chunk_play_at(sub_state, audio_dur_sec, sync_point)
-
-        local timeout = AUDIO_CHUNK_SEC
+        
+        local timeout = speaker_cache_target
         local timer, fallback_timer, tid
 
         local function all_receivers_replied()
@@ -267,9 +249,10 @@ local function transmit_audio(data_buffer)
                         play_state.num_active = play_state.num_active + 1
                         table.insert(reply.ids, id)
                         table.insert(reply.times, timestamp_ms)
-                        chat.log_message(string.format('#%d (%s) | n=%d/%d chunk=%d', id,
-                            ("%0.3f"):format(timestamp_ms/1000):sub(-8),
-                            play_state.num_active, play_state.n_receivers, sub_state.chunk_id), "DEBUG")
+                        local play_duration = timestamp_ms - (previous.req_chunk_times[id] or timestamp_ms)
+                        chat.log_message(string.format('#%d (%s, %dms) | n=%d/%d', id,
+                            ("%0.3f"):format(timestamp_ms/1000):sub(-8), play_duration,
+                            play_state.num_active, play_state.n_receivers ), "DEBUG")
                         previous.req_chunk_times[id] = timestamp_ms
                     elseif msg == "playback_stopped" then
                         play_state.n_receivers = play_state.n_receivers + 1
@@ -279,10 +262,9 @@ local function transmit_audio(data_buffer)
                     end
                 until all_receivers_replied()
             end,
+
             function ()
-                repeat
-                    _,tid = os.pullEvent('timer')
-                until (timer and tid == timer) or (fallback_timer and tid == fallback_timer)
+                repeat _,tid = os.pullEvent('timer') until (timer and tid == timer) or (fallback_timer and tid == fallback_timer)
                 for id, status in pairs(istate.receiver_stats) do
                     if not play_state.receiver_stats[id] then
                         M.state.receiver_stats[id] = nil
@@ -296,6 +278,7 @@ local function transmit_audio(data_buffer)
 
         if timer then os.cancelTimer(timer) end
         if fallback_timer then os.cancelTimer(fallback_timer) end
+
     end
 
     -- print(textutils.serialize(M.state, {compact = true, allow_repetitions = true}))
@@ -305,7 +288,7 @@ local function transmit_audio(data_buffer)
         if sub_state.chunk_id == 1 then
             sync_wait = 2*sync_wait -- 2 tick on start
         else
-            os.queueEvent('redionet:sync') -- flush client speaker queues
+            os.queueEvent('redionet:sync') -- stops speakers and sets audio.state.speaker_cache = 0
         end
 
         chat.log_message(('Audio sync. Listening: %d/%d'):format(M.state.num_active, M.state.n_receivers), "INFO")
@@ -319,44 +302,58 @@ local function transmit_audio(data_buffer)
 
     local ok, err = pcall(parallel.waitForAll, timed_play_task, function () if not M.state.prefill_end then data_buffer:read_n(2) end end)
 
-    -- AUDIO_HALT makes all clients not request_next_chunk, thus #rep_ids=0. Only warn if server has active song. 
+    -- PROTO_AUDIO_HALT makes all clients not request_next_chunk, thus #rep_ids=0. Only warn if server has active song. 
+    -- Noteably, audio.stop_song broadcasts halt. stop_song is also called when a song is skipped, or play now clicked.
     if #reply.ids == 0 and STATE.active_stream_id ~= nil then
         chat.log_message('No remaining listeners... Stopping', 'WARN')
         return M.stop_song()
     end
 
     if #reply.times > 1 then
-        local desync_ms = (math.max(table.unpack(reply.times)) - math.min(table.unpack(reply.times)))
+        local desync_ms = (math.max(table.unpack(reply.times)) - math.min(table.unpack(reply.times)))--/Gms
         chat.log_message(string.format('max client desync: %dms | n=%d/%d', desync_ms, #reply.times, play_state.n_receivers), "INFO")
-        if desync_ms > 1000 then
+
+        if desync_ms > 1000 then -- more than 1000ms lag time, warn and resync
             chat.log_message('Detected client desync. Forcing sync..', "WARN")
+            
+            local id_order, delay = {'ID:'}, {'LAG'}
+            for i,id in ipairs(reply.ids) do
+                id_order[i+1] = ("%d"):format(id) -- ensure str, tabulate will get confused
+                delay[i+1] = ("%dms"):format(((i < #reply.times and reply.times[i+1] - reply.times[i]) or 0))--/Gms)
+            end
+            textutils.tabulate(colors.white, id_order, colors.pink, delay)
             os.queueEvent('redionet:sync')
-            M.state.next_play_at_ms = nil
-            M.state.speaker_cache = 0
         end
     end
 
+
     if previous.time_audio_sent then
         local send_elapsed = (time_audio_sent - previous.time_audio_sent)
+        -- chat.log_message(('Send elapsed: %0.3fs, SpkCache: %0.3fs'):format(send_elapsed/(Gms*1000), M.state.speaker_cache), "DEBUG")
         chat.log_message(('Send elapsed: %0.3fs, SpkCache: %0.3fs'):format(send_elapsed/1000, M.state.speaker_cache), "DEBUG")
     end
 
     previous.time_audio_sent = time_audio_sent
 
     local elapsed_sec = (os.epoch('local') - time_audio_sent)/1000
+    -- local elapsed_sec = (os.epoch("ingame") - time_audio_sent)/(Gms*1000)
     local free_sec = audio_dur_sec - elapsed_sec
-    M.state.speaker_cache = M.state.speaker_cache + free_sec
-    local wait_seconds = round_tick_sec(M.state.speaker_cache - speaker_cache_target - 0.005)
 
-    chat.log_message(('elap: %0.3fs, free: %0.3fs, audio: %0.3fs, wait: %0.3fs'):format(
-        elapsed_sec, free_sec, audio_dur_sec, wait_seconds), "DEBUG")
+    -- If more time passed than the duration of the audio sent (e.g. client timeout), the difference (free_sec) is deducted from the speakers' buffered audio
+    M.state.speaker_cache = M.state.speaker_cache + free_sec
+    local wait_seconds = round_tick_sec(M.state.speaker_cache - speaker_cache_target - 0.005) -- 5ms bias toward sending early. cost of early < cost late 
+
+    chat.log_message(('elap: %0.3fs, free: %0.3fs, audio: %0.3fs\n'..'SpkCache: %0.3fs, total_wait: %0.3fs'):format(
+        elapsed_sec, free_sec, audio_dur_sec,  M.state.speaker_cache, wait_seconds), "DEBUG")
 
     parallel.waitForAll(
         function () wait_speakers(wait_seconds) end,
+        -- typically takes ~200-300ms to read2. If < 1sec clearance, we skip the read and draw from previously cached data on next iteration.
         function () if M.state.prefill_end and wait_seconds > 1.000 then data_buffer:read_n(2) end end
     )
 
     M.state.speaker_cache = M.state.speaker_cache - wait_seconds
+    -- if speaker buffers overfill, the majority of wait time will be on timed_play_task instead of wait_speakers. prefill_end determines when to read
     M.state.prefill_end = wait_seconds > elapsed_sec
 
     if ok then
@@ -369,9 +366,8 @@ end
 ---@param data_buffer Buffer holds data
 local function process_audio_data(data_buffer)
     M.state.speaker_cache = 0
-    M.state.need_sync = true
+    M.state.need_sync = true -- always sync on new song
     M.state.prefill_end = true
-    M.state.next_play_at_ms = nil
 
     previous = {
         req_chunk_times = {},

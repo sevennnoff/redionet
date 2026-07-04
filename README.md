@@ -2,6 +2,21 @@
 
 Synchronized, server-wide music streaming with ComputerCraft.
 
+This fork ([sevennnoff/redionet](https://github.com/sevennnoff/redionet)) extends [Rypo/redionet](https://github.com/Rypo/redionet) with a **centralized control model**: one server owns playback, one optional controller runs the UI, and passive speaker clients only play synchronized audio.
+
+## Why this fork?
+
+| | Upstream (Rypo) | This fork |
+|---|---|---|
+| **Roles** | Every computer can search, queue, and control playback | **Server** streams · **Controller** controls · **Client** listens |
+| **Control** | Open — any connected client can change the queue | **Password-protected** — only the authorized controller |
+| **Volume / loop / skip** | Per-client or first-come | **Server-wide**, set from the controller |
+| **Client UI** | Full player on every machine | Passive clients show status only; controller has the full UI |
+| **Updates** | Manual per machine | `rn update` on the server pushes to all devices |
+| **Protocol** | `PROTO_*` | `RDN:*:v5` (legacy clients can be flushed with `rn killlegacy`) |
+
+Audio sync uses the same chunk-barrier algorithm as upstream Rypo (server decodes, rednet broadcast, speaker-buffer pacing). Fork-specific work focuses on roles, auth, and remote management — not experimental sync modes.
+
 **Features**
 - Shared audio streaming anywhere in a server, even across dimensions!
 - Scrollable Search Results. Use arrow keys to scroll results
@@ -105,5 +120,6 @@ Volume is server-wide. Changing it on the authorized Controller updates all conn
 - Age-restricted and videos longer than ~20 minutes may fail to download. The exact threshold varies; in testing, the shortest failure was ~18min, the longest success ~45min.
 
 ## Acknowledgements
+- [Rypo/redionet](https://github.com/Rypo/redionet) — upstream project and sync algorithm this fork is based on.
 - The [foundational code author](https://github.com/terreng/computercraft-streaming-music) and backend host. This project is rooted in his original work. 
 - [YouCube](https://github.com/CC-YouCube/client) - a continual source of design and function inspiration throughout development.
