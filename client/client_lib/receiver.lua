@@ -7,8 +7,8 @@ local dfpwm = require("cc.audio.dfpwm")
 
 local speaker = peripheral.find("speaker")
 
-local MAX_QUEUE = 2
-local LATE_FLUSH_MS = 200
+local MAX_QUEUE = 8
+local LATE_FLUSH_MS = 500
 
 local play_queue = {}
 local expected_chunk_id = 0
@@ -205,7 +205,7 @@ local function enqueue_chunk(server_id, encoded, state)
     end
 
     while #play_queue >= MAX_QUEUE do
-        table.remove(play_queue, 1)
+        os.sleep(0.05)
     end
 
     table.insert(play_queue, { encoded = encoded, state = state })

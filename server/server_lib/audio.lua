@@ -10,13 +10,13 @@ local chat = require('server_lib.chat')
 
 local AUDIO_CHUNK_SEC = 2.70 -- maximum tick multiple under 2.730666.. [(2^7 * 2^10) samples / 48000kHz]
 local TICK = 0.050
-local START_LEAD_MS = 1500
-local RESYNC_LEAD_MS = 800
-local CHUNK_LEAD_MS = 100
-local PREFETCH_CHUNKS = 3
+local START_LEAD_MS = 900
+local RESYNC_LEAD_MS = 500
+local CHUNK_LEAD_MS = 250
+local PREFETCH_CHUNKS = 8
 local MAX_PIPELINE_MS = math.floor(PREFETCH_CHUNKS * AUDIO_CHUNK_SEC * 1000)
-local ACK_COLLECT_SEC = 0.12
-local TIMELINE_SETTLE_SEC = 0.15
+local ACK_COLLECT_SEC = 0.05
+local TIMELINE_SETTLE_SEC = 0.08
 
 local M = {}
 
@@ -140,6 +140,9 @@ function Buffer.new(handle, song_meta)
     return self
 end
 
+local function chunk_duration_ms(data)
+    return (#data * 8 * 1000) / 48000
+end
 
 --- Broadcast timeline anchor so all clients flush and align on local wall clock.
 ---@param is_new_stream boolean longer lead before first chunk of a new song
@@ -179,7 +182,7 @@ local function transmit_audio(data_buffer)
         return
     end
 
-    local audio_dur_sec = (#audio_chunk * 8) / 48000
+    local audio_dur_sec = chunk_duration_ms(audio_chunk) / 1000
 
     local sub_state = {
         active_stream_id = STATE.active_stream_id,
@@ -221,8 +224,11 @@ local function transmit_audio(data_buffer)
         end
 
         local now_ms = os.epoch("local")
-        sub_state.play_at_ms = math.max(M.state.next_play_at_ms or now_ms, now_ms + CHUNK_LEAD_MS)
-        M.state.next_play_at_ms = sub_state.play_at_ms + math.floor(audio_dur_sec * 1000)
+        if not M.state.next_play_at_ms or M.state.next_play_at_ms < now_ms + CHUNK_LEAD_MS then
+            M.state.next_play_at_ms = now_ms + CHUNK_LEAD_MS
+        end
+        sub_state.play_at_ms = M.state.next_play_at_ms
+        M.state.next_play_at_ms = sub_state.play_at_ms + chunk_duration_ms(audio_chunk)
 
         local function all_receivers_replied()
             for id, _ in pairs(istate.receiver_stats) do
@@ -285,11 +291,6 @@ local function transmit_audio(data_buffer)
     if #reply.times > 1 then
         local desync_ms = math.max(table.unpack(reply.times)) - math.min(table.unpack(reply.times))
         chat.log_message(string.format('max recv desync: %dms | n=%d/%d', desync_ms, #reply.times, play_state.n_receivers), "INFO")
-
-        if desync_ms > 1000 then
-            chat.log_message('Detected client desync. Forcing sync..', "WARN")
-            M.state.need_sync = true
-        end
     end
 
     if previous.time_audio_sent then
