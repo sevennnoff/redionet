@@ -16,6 +16,11 @@ function M.format_search_url(query)
     return M.config.api_base_url .. "?v=" .. M.config.version .. "&search=" .. textutils.urlEncode(query)
 end
 
+function M.format_download_url(song_id)
+    if not song_id then return nil end
+    return M.config.api_base_url .. "?v=" .. M.config.version .. "&id=" .. textutils.urlEncode(song_id)
+end
+
 
 function M.search(query)
     CSTATE.last_search_query = query

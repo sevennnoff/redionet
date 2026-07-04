@@ -59,6 +59,8 @@ STATE = {
         queue = {},             -- song queue, list of objects like active_song_meta
         active_song_meta = nil, -- Metadata for the song in the player {id=str, name=str, artist=str, duration={H=int, M=int, S=int}}
         audio_position_sec = 0, -- current server playback position
+        timeline_origin_ms = nil, -- wall ms when song position 0 starts
+        audio_position_epoch_ms = nil, -- ms stamp of audio_position_sec for client extrapolation
         loop_mode = 0,          -- 0: Off, 1: Queue/List, 2: Song
         volume = 1.5,           -- server-wide volume, value between 0 and 3
         controller_id = nil,    -- client id that entered the control password

@@ -32,6 +32,7 @@ REDIONET_PROTO = {
 
 local ui = require("client_lib.ui")
 local receiver = require("client_lib.receiver")
+local local_audio = require("client_lib.local_audio")
 local net = require('client_lib.net')
 
 
@@ -338,7 +339,7 @@ else
     parallel.waitForAny(
         system_stop_event,
         client_loop,
-        receiver.receive_loop
+        local_audio.loop
     )
 end
 

@@ -177,6 +177,19 @@ local function draw_tabs_bar()
     term.write(status_label)
 end
 
+local function format_time(seconds)
+    seconds = math.floor(seconds or 0)
+    return ("%d:%02d"):format(math.floor(seconds / 60), seconds % 60)
+end
+
+local function current_display_position_sec()
+    local pos = CSTATE.server_state.audio_position_sec or 0
+    if CSTATE.server_state.status == 1 and CSTATE.state_received_epoch_ms then
+        pos = pos + (os.epoch("local") - CSTATE.state_received_epoch_ms) / 1000
+    end
+    return pos
+end
+
 local function write_time_artist(song_meta)
     local artist_line
 
@@ -195,9 +208,8 @@ local function write_time_artist(song_meta)
     end
 
     if M.state.now_playing_artist_line then
-        -- NOTE: will be malformed if somehow audio longer than 1hr manages to play.
-        local seconds = CSTATE.server_state.audio_position_sec or 0
-        local timefmt = ('%d:%02d'):format(math.floor(seconds / 60), math.floor(seconds % 60))
+        local seconds = current_display_position_sec()
+        local timefmt = format_time(seconds)
         set_colors(config.colors.text_secondary, config.colors.bg)
         term.setCursorPos(config.ui.xpos, 4)
         term.write(("%s/%s"):format(timefmt, M.state.now_playing_artist_line))
@@ -820,6 +832,15 @@ function M.ui_loop()
                     while true do
                         os.sleep(1)
                         receiver.update_server_state()
+                    end
+                end,
+
+                function ()
+                    while true do
+                        os.sleep(1)
+                        if CSTATE.server_state.status == 1 and M.state.active_tab == 1 and M.state.now_playing_artist_line then
+                            write_time_artist(CSTATE.server_state.active_song_meta)
+                        end
                     end
                 end
             )
