@@ -269,7 +269,13 @@ local function client_loop()
                 if speaker then
                     speaker.stop()
                     if type(payload) == "table" and payload.anchor_ms then
-                        os.queueEvent("redionet:timeline_anchor", payload.anchor_ms, payload.stream_id)
+                        os.queueEvent(
+                            "redionet:timeline_anchor",
+                            payload.anchor_ms,
+                            payload.stream_id,
+                            payload.chunk_id,
+                            payload.timeline_origin_ms
+                        )
                     else
                         os.queueEvent("redionet:playback_stopped")
                     end
