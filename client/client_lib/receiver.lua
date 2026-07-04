@@ -102,7 +102,10 @@ end
 local function play_audio(buffer, state)
     if not buffer or CSTATE.is_paused or state.active_stream_id ~= state.song_id then return end
 
-    local volume = CSTATE.server_state.volume or 1.5
+    if state.volume then
+        CSTATE.server_state.volume = state.volume
+    end
+    local volume = state.volume or CSTATE.server_state.volume or 1.5
     dbgmon(('- %0.3fs - chunk: %d, song: %s, vol: %0.2f'):format(
         state.audio_position_sec, state.chunk_id, state.song_id, volume))
     os.queueEvent("redionet:audio_timestamp", state.audio_position_sec)
@@ -135,6 +138,7 @@ function M.receive_loop()
     debug_init()
 
     rednet.send(SERVER_ID, CSTATE.is_paused and 0 or 1, REDIONET_PROTO.AUDIO_CONNECTION)
+    os.queueEvent('redionet:sync_state')
 
     while true do
         parallel.waitForAny(

@@ -24,9 +24,7 @@ M.state = {
 }
 
 local speaker_cache_target = AUDIO_CHUNK_SEC/2 -- sec of audio stored in speakers at anytime. Higher = latency desync protection. Lower = reduced resync audio gaps
-local speaker_cache_max = speaker_cache_target * 2
 local first_response_timeout = AUDIO_CHUNK_SEC
-local AUTO_RESYNC_MS = 5000 -- manual `rn sync` still available; auto flush caused collective silence
 
 local previous = {
     req_chunk_times = {},
@@ -149,14 +147,7 @@ end
 
 
 local function round_tick_sec(seconds)
-    if seconds <= 0 then return 0 end
     return math.ceil(math.max(seconds, TICK) * 20) * TICK -- 20 tick/sec
-end
-
-local function flush_speaker_state(reason)
-    M.state.speaker_cache = 0
-    M.state.prefill_end = true
-    chat.log_message(('Speaker flush: %s'):format(reason or 'sync'), 'INFO')
 end
 
 local function wait_speakers(max_wait, eps)
@@ -186,8 +177,8 @@ local function transmit_audio(data_buffer)
         active_stream_id = STATE.active_stream_id, -- this is the only place we give clients access to active_stream_id
         song_id = data_buffer.song_id, -- add in local song_id for interrupts
         chunk_id = data_buffer.total_write.chunks,
-        -- audio_dur_sec = audio_dur_sec,
         audio_position_sec = previous.audio_position_sec,
+        volume = STATE.data.volume,
     }
     previous.audio_position_sec = previous.audio_position_sec + audio_dur_sec
     STATE.data.audio_position_sec = sub_state.audio_position_sec
@@ -295,12 +286,9 @@ local function transmit_audio(data_buffer)
         local sync_wait = TICK
 
         if sub_state.chunk_id == 1 then
-            sync_wait = 2 * sync_wait
-            flush_speaker_state('track start')
-            os.queueEvent('redionet:sync')
+            sync_wait = 2*sync_wait -- 2 tick on start
         else
-            -- mid-play: reset pacing only; full CLIENT_SYNC flush desyncs speaker buffers
-            flush_speaker_state('mid-play resync')
+            os.queueEvent('redionet:sync') -- stops speakers and sets audio.state.speaker_cache = 0
         end
 
         chat.log_message(('Audio sync. Listening: %d/%d'):format(M.state.num_active, M.state.n_receivers), "INFO")
@@ -312,7 +300,7 @@ local function transmit_audio(data_buffer)
         M.state.need_sync = false
     end
 
-    local ok, err = pcall(parallel.waitForAll, timed_play_task, function () data_buffer:read_n(2) end)
+    local ok, err = pcall(parallel.waitForAll, timed_play_task, function () if not M.state.prefill_end then data_buffer:read_n(2) end end)
 
     -- PROTO_AUDIO_HALT makes all clients not request_next_chunk, thus #rep_ids=0. Only warn if server has active song. 
     -- Noteably, audio.stop_song broadcasts halt. stop_song is also called when a song is skipped, or play now clicked.
@@ -325,9 +313,15 @@ local function transmit_audio(data_buffer)
         local desync_ms = (math.max(table.unpack(reply.times)) - math.min(table.unpack(reply.times)))--/Gms
         chat.log_message(string.format('max client desync: %dms | n=%d/%d', desync_ms, #reply.times, play_state.n_receivers), "INFO")
 
-        if desync_ms > AUTO_RESYNC_MS then
-            chat.log_message(('Client desync %dms (auto resync at %dms)'):format(desync_ms, AUTO_RESYNC_MS), "WARN")
-            flush_speaker_state('desync')
+        if desync_ms > 1000 then -- more than 1000ms lag time, warn and resync
+            chat.log_message('Detected client desync. Forcing sync..', "WARN")
+            
+            local id_order, delay = {'ID:'}, {'LAG'}
+            for i,id in ipairs(reply.ids) do
+                id_order[i+1] = ("%d"):format(id) -- ensure str, tabulate will get confused
+                delay[i+1] = ("%dms"):format(((i < #reply.times and reply.times[i+1] - reply.times[i]) or 0))--/Gms)
+            end
+            textutils.tabulate(colors.white, id_order, colors.pink, delay)
             os.queueEvent('redionet:sync')
         end
     end
@@ -345,23 +339,20 @@ local function transmit_audio(data_buffer)
     -- local elapsed_sec = (os.epoch("ingame") - time_audio_sent)/(Gms*1000)
     local free_sec = audio_dur_sec - elapsed_sec
 
-    M.state.speaker_cache = math.min(M.state.speaker_cache + free_sec, speaker_cache_max)
-    local wait_seconds = round_tick_sec(M.state.speaker_cache - speaker_cache_target - 0.005)
-    wait_seconds = math.min(wait_seconds, speaker_cache_target)
+    -- If more time passed than the duration of the audio sent (e.g. client timeout), the difference (free_sec) is deducted from the speakers' buffered audio
+    M.state.speaker_cache = M.state.speaker_cache + free_sec
+    local wait_seconds = round_tick_sec(M.state.speaker_cache - speaker_cache_target - 0.005) -- 5ms bias toward sending early. cost of early < cost late 
 
     chat.log_message(('elap: %0.3fs, free: %0.3fs, audio: %0.3fs\n'..'SpkCache: %0.3fs, total_wait: %0.3fs'):format(
         elapsed_sec, free_sec, audio_dur_sec,  M.state.speaker_cache, wait_seconds), "DEBUG")
 
-    if wait_seconds > 0 then
-        parallel.waitForAll(
-            function () wait_speakers(wait_seconds) end,
-            function () data_buffer:read_n(2) end
-        )
-    else
-        data_buffer:read_n(2)
-    end
+    parallel.waitForAll(
+        function () wait_speakers(wait_seconds) end,
+        -- typically takes ~200-300ms to read2. If < 1sec clearance, we skip the read and draw from previously cached data on next iteration.
+        function () if M.state.prefill_end and wait_seconds > 1.000 then data_buffer:read_n(2) end end
+    )
 
-    M.state.speaker_cache = math.max(0, M.state.speaker_cache - wait_seconds)
+    M.state.speaker_cache = M.state.speaker_cache - wait_seconds
     -- if speaker buffers overfill, the majority of wait time will be on timed_play_task instead of wait_speakers. prefill_end determines when to read
     M.state.prefill_end = wait_seconds > elapsed_sec
 
@@ -541,8 +532,8 @@ function M.audio_loop()
                         if not handle then error('bad state: read handle is nil', 0) end -- appease the linter (state should be unreachable)
 
                         if should_play then
-                            -- announce here, last moment before audio actually plays
                             chat.announce_song(STATE.data.active_song_meta.artist, STATE.data.active_song_meta.name)
+                            os.queueEvent('redionet:broadcast_state', 'track start')
                             if dbuffer then
                                 dbuffer = dbuffer:destroy() -- if it still exists, the song didn't complete. cannot guarantee clean state
                             end
