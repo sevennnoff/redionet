@@ -61,6 +61,7 @@ STATE = {
         audio_position_sec = 0, -- current server playback position
         timeline_origin_ms = nil, -- wall ms when song position 0 starts
         audio_position_epoch_ms = nil, -- ms stamp of audio_position_sec for client extrapolation
+        server_time_ms = nil, -- server os.epoch(local) at last state build for clock sync
         loop_mode = 0,          -- 0: Off, 1: Queue/List, 2: Song
         volume = 1.5,           -- server-wide volume, value between 0 and 3
         controller_id = nil,    -- client id that entered the control password
@@ -73,11 +74,20 @@ STATE = {
 
 
 local function extrapolate_audio_position()
+    if STATE.data.status == 1 and STATE.data.timeline_origin_ms then
+        STATE.data.audio_position_sec = math.max(0, (os.epoch("local") - STATE.data.timeline_origin_ms) / 1000)
+        STATE.audio_position_epoch_ms = os.epoch("local")
+        STATE.data.audio_position_epoch_ms = STATE.audio_position_epoch_ms
+        STATE.data.server_time_ms = os.epoch("local")
+        return
+    end
     if STATE.data.status == 1 and STATE.audio_position_epoch_ms then
         local elapsed_sec = (os.epoch("local") - STATE.audio_position_epoch_ms) / 1000
         STATE.data.audio_position_sec = math.max(0, STATE.data.audio_position_sec + elapsed_sec)
         STATE.audio_position_epoch_ms = os.epoch("local")
+        STATE.data.audio_position_epoch_ms = STATE.audio_position_epoch_ms
     end
+    STATE.data.server_time_ms = os.epoch("local")
 end
 
 ---broadcast server state data over the server state protocol

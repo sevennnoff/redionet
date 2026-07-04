@@ -275,7 +275,8 @@ local function client_loop()
                             payload.anchor_ms,
                             payload.stream_id,
                             payload.chunk_id,
-                            payload.timeline_origin_ms
+                            payload.timeline_origin_ms,
+                            payload.server_time_ms
                         )
                     else
                         os.queueEvent("redionet:playback_stopped")
