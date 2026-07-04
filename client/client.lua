@@ -121,12 +121,25 @@ local function setup_server_connection()
     write('Waiting for server connection')
     local id, server_settings
 
+    local function wait_server_reply(timeout)
+        local timer = os.startTimer(timeout or 1)
+
+        while true do
+            local event, p1, p2, p3 = os.pullEvent()
+            if event == "timer" and p1 == timer then
+                return nil
+            elseif event == "rednet_message" and p3 == "PROTO_SERVER:REPLY" and type(p2) == "table" then
+                return p1, p2
+            end
+        end
+    end
+
     local payload, code
     repeat
         write(".")
         rednet.broadcast("CONFIG", 'PROTO_SERVER')
 
-        id, payload = rednet.receive('PROTO_SERVER:REPLY', 1.0)
+        id, payload = wait_server_reply(1)
         if payload then
             code, server_settings = table.unpack(payload)
             if code ~= "CONFIG" then
