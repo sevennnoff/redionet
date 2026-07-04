@@ -11,16 +11,19 @@ local speaker = peripheral.find("speaker")
 local AUDIO_CHUNK_SEC = 2.70
 local CHUNK_BYTES = (AUDIO_CHUNK_SEC * 48000) / 8
 local MIN_BUFFER_CHUNKS = 2
-local DRIFT_RESYNC_MS = 600
-local DRIFT_CHECK_SEC = 0.15
+local DRIFT_RESYNC_MS = 800
+local DRIFT_CHECK_SEC = 0.20
+local DOWNLOAD_RETRIES = 3
 
 local chunks = {}
 local song_id = nil
+local session_id = nil
 local http_handle = nil
 local read_done = false
 local read_start_ms = 0
 local buffer_ready_sent = false
 local buffer_ready_sent_at = nil
+local download_attempts = 0
 local timeline_origin_ms = nil
 local timeline_stream_id = nil
 local next_chunk_id = 1
@@ -57,7 +60,27 @@ local function sync_clock(server_time_ms)
     end
 end
 
-local function reset_playback(stream_id, chunk_id, origin_ms)
+local function hard_reset_local()
+    if speaker then speaker.stop() end
+    if http_handle then pcall(http_handle.close) end
+    chunks = {}
+    http_handle = nil
+    read_done = false
+    read_start_ms = 0
+    buffer_ready_sent = false
+    buffer_ready_sent_at = nil
+    download_attempts = 0
+    next_chunk_id = 1
+    timeline_origin_ms = nil
+    timeline_stream_id = nil
+    decoder = dfpwm.make_decoder()
+end
+
+local function reset_playback(stream_id, chunk_id, origin_ms, new_session_id)
+    if new_session_id and session_id and new_session_id ~= session_id then
+        return
+    end
+    if new_session_id then session_id = new_session_id end
     if speaker then speaker.stop() end
     decoder = dfpwm.make_decoder()
     timeline_stream_id = stream_id
@@ -81,9 +104,9 @@ local function chunk_id_for_position(sec)
     return #chunks
 end
 
-local function start_download(id)
+local function start_download(id, force)
     if not id then return end
-    if song_id == id and (http_handle or #chunks > 0) then return end
+    if not force and song_id == id and (http_handle or #chunks > 0 or loading()) then return end
 
     if http_handle then pcall(http_handle.close) end
     song_id = id
@@ -95,8 +118,13 @@ local function start_download(id)
     buffer_ready_sent_at = nil
     next_chunk_id = 1
     decoder = dfpwm.make_decoder()
+    download_attempts = download_attempts + 1
     http.request({ url = net.format_download_url(id), binary = true })
-    dbgmon("download " .. tostring(id))
+    dbgmon(("download %s try %d"):format(tostring(id), download_attempts))
+end
+
+function loading()
+    return song_id ~= nil and not read_done and #chunks == 0 and http_handle == nil and download_attempts > 0
 end
 
 local function read_one_chunk()
@@ -148,7 +176,8 @@ local function play_audio(buffer, volume)
     while not speaker.playAudio(buffer, volume) do
         parallel.waitForAny(
             function() os.pullEvent("speaker_audio_empty") end,
-            function() os.pullEvent("redionet:playback_stopped") end
+            function() os.pullEvent("redionet:playback_stopped") end,
+            function() os.pullEvent("redionet:local_stop") end
         )
         if CSTATE.is_paused then return end
     end
@@ -173,6 +202,10 @@ local function wait_for_play_at(play_at_ms)
             function()
                 os.pullEvent("redionet:playback_stopped")
                 proceed = false
+            end,
+            function()
+                os.pullEvent("redionet:local_stop")
+                proceed = false
             end
         )
         os.cancelTimer(timer_id)
@@ -180,32 +213,49 @@ local function wait_for_play_at(play_at_ms)
     end
 end
 
+local function schedule_play()
+    if timeline_origin_ms and CSTATE.server_state.status == 1 and not CSTATE.is_paused then
+        os.queueEvent("redionet:local_audio_ready")
+    end
+end
+
 local function play_next_chunk()
     if not speaker or CSTATE.is_paused or not timeline_origin_ms then return end
     if CSTATE.server_state.status ~= 1 then return end
 
-    while next_chunk_id <= #chunks do
-        local entry = chunks[next_chunk_id]
-        if not entry then return end
-
-        local play_at_ms = timeline_origin_ms + entry.start_ms
-        local now_ms = wait_for_play_at(play_at_ms)
-        if not now_ms or CSTATE.is_paused or CSTATE.server_state.status ~= 1 then return end
-
-        local target_sec = target_position_sec()
-        local chunk_end_sec = (entry.start_ms + chunk_duration_ms(entry.data)) / 1000
-        if target_sec > chunk_end_sec + (DRIFT_RESYNC_MS / 1000) then
-            dbgmon(("drift skip to %0.2fs at chunk %d"):format(target_sec, next_chunk_id))
-            seek_to_position(target_sec)
-            return
+    if next_chunk_id > #chunks then
+        if not read_done then
+            os.sleep(0.05)
+            schedule_play()
         end
-
-        local buffer = decoder(entry.data)
-        play_audio(buffer, CSTATE.server_state.volume or 1.5)
-        os.queueEvent("redionet:audio_timestamp", entry.start_ms / 1000)
-        next_chunk_id = next_chunk_id + 1
         return
     end
+
+    local entry = chunks[next_chunk_id]
+    if not entry then
+        schedule_play()
+        return
+    end
+
+    local play_at_ms = timeline_origin_ms + entry.start_ms
+    local now_ms = wait_for_play_at(play_at_ms)
+    if not now_ms or CSTATE.is_paused or CSTATE.server_state.status ~= 1 then return end
+
+    local target_sec = target_position_sec()
+    local chunk_end_sec = (entry.start_ms + chunk_duration_ms(entry.data)) / 1000
+    if target_sec > chunk_end_sec + (DRIFT_RESYNC_MS / 1000) then
+        dbgmon(("drift seek %0.2fs chunk %d"):format(target_sec, next_chunk_id))
+        if seek_to_position(target_sec) then
+            schedule_play()
+        end
+        return
+    end
+
+    local buffer = decoder(entry.data)
+    play_audio(buffer, CSTATE.server_state.volume or 1.5)
+    os.queueEvent("redionet:audio_timestamp", entry.start_ms / 1000)
+    next_chunk_id = next_chunk_id + 1
+    schedule_play()
 end
 
 local M = {}
@@ -233,35 +283,36 @@ function M.loop()
                     elseif ev[1] == "http_success" then
                         http_handle = ev[3]
                         read_done = false
+                        download_attempts = 0
                         os.queueEvent("redionet:local_read_chunk")
                     elseif ev[1] == "http_failure" then
                         dbgmon("download failed")
                         http_handle = nil
+                        if download_attempts < DOWNLOAD_RETRIES then
+                            os.sleep(0.5)
+                            start_download(song_id, true)
+                        else
+                            rednet.send(SERVER_ID, "buffer_failed", REDIONET_PROTO.AUDIO_NEXT)
+                        end
                     end
                 end
             end,
 
             function()
                 while true do
-                    local _, prep_song_id = os.pullEvent("redionet:prepare_stream")
-                    buffer_ready_sent = false
-                    buffer_ready_sent_at = nil
-                    start_download(prep_song_id or (CSTATE.server_state.active_song_meta and CSTATE.server_state.active_song_meta.id))
+                    local _, prep_song_id, prep_session_id = os.pullEvent("redionet:prepare_stream")
+                    if prep_session_id then session_id = prep_session_id end
+                    hard_reset_local()
+                    start_download(prep_song_id or (CSTATE.server_state.active_song_meta and CSTATE.server_state.active_song_meta.id), true)
                 end
             end,
 
             function()
                 while true do
                     os.pullEvent("redionet:local_stop")
-                    if speaker then speaker.stop() end
-                    if http_handle then pcall(http_handle.close) end
-                    chunks = {}
-                    http_handle = nil
-                    read_done = false
-                    buffer_ready_sent = false
-                    buffer_ready_sent_at = nil
-                    next_chunk_id = 1
-                    timeline_origin_ms = nil
+                    hard_reset_local()
+                    song_id = nil
+                    session_id = nil
                 end
             end,
 
@@ -271,22 +322,21 @@ function M.loop()
                     if read_one_chunk() and not read_done then
                         os.queueEvent("redionet:local_read_chunk")
                     end
-                    if timeline_origin_ms and next_chunk_id <= #chunks then
-                        os.queueEvent("redionet:local_audio_ready")
-                    end
+                    schedule_play()
                 end
             end,
 
             function()
                 while true do
-                    local _, anchor_ms, stream_id, chunk_id, origin_ms, server_time_ms = os.pullEvent("redionet:timeline_anchor")
+                    local _, anchor_ms, stream_id, chunk_id, origin_ms, server_time_ms, new_session_id =
+                        os.pullEvent("redionet:timeline_anchor")
                     sync_clock(server_time_ms)
-                    reset_playback(stream_id, chunk_id, origin_ms)
+                    reset_playback(stream_id, chunk_id, origin_ms, new_session_id)
                     if chunk_id and chunk_id > 1 then
                         catch_up_decoder(chunk_id)
                     end
-                    dbgmon(("anchor chunk=%s"):format(tostring(chunk_id)))
-                    os.queueEvent("redionet:local_audio_ready")
+                    dbgmon(("anchor s%s chunk %s"):format(tostring(session_id), tostring(chunk_id)))
+                    schedule_play()
                 end
             end,
 
@@ -294,9 +344,6 @@ function M.loop()
                 while true do
                     os.pullEvent("redionet:local_audio_ready")
                     play_next_chunk()
-                    if next_chunk_id <= #chunks and CSTATE.server_state.status == 1 and not CSTATE.is_paused then
-                        os.queueEvent("redionet:local_audio_ready")
-                    end
                 end
             end,
 
@@ -305,36 +352,40 @@ function M.loop()
                     local state = CSTATE.server_state
                     sync_clock(state.server_time_ms)
 
-                    if state.status == 1 and state.active_song_meta and not CSTATE.is_paused then
-                        start_download(state.active_song_meta.id)
+                    local meta = state.active_song_meta
+                    if state.status == 1 and meta and not CSTATE.is_paused then
+                        if meta.id ~= song_id then
+                            start_download(meta.id, true)
+                        end
 
-                        if state.timeline_origin_ms and timeline_origin_ms ~= state.timeline_origin_ms then
+                        if state.timeline_origin_ms
+                            and timeline_origin_ms ~= state.timeline_origin_ms
+                            and #chunks >= MIN_BUFFER_CHUNKS then
                             local chunk_id = chunk_id_for_position(state.audio_position_sec or 0)
-                            reset_playback(state.active_song_meta.id, chunk_id, state.timeline_origin_ms)
+                            reset_playback(meta.id, chunk_id, state.timeline_origin_ms, session_id)
                             if chunk_id > 1 then catch_up_decoder(chunk_id) end
-                            os.queueEvent("redionet:local_audio_ready")
+                            schedule_play()
                         elseif timeline_origin_ms and #chunks > 0 then
                             local target = target_position_sec()
                             local local_sec = chunks[next_chunk_id] and (chunks[next_chunk_id].start_ms / 1000) or 0
                             if math.abs(target - local_sec) * 1000 > DRIFT_RESYNC_MS then
                                 if seek_to_position(target) then
-                                    dbgmon(("drift seek to %0.2fs"):format(target))
-                                    os.queueEvent("redionet:local_audio_ready")
+                                    dbgmon(("drift fix %0.2fs"):format(target))
+                                    schedule_play()
                                 end
+                            elseif next_chunk_id > #chunks and not read_done then
+                                schedule_play()
                             end
                         elseif #chunks >= MIN_BUFFER_CHUNKS and not timeline_origin_ms and buffer_ready_sent_at then
-                            if os.epoch("local") - buffer_ready_sent_at > 2500 then
+                            if os.epoch("local") - buffer_ready_sent_at > 3000 then
                                 buffer_ready_sent_at = os.epoch("local")
                                 rednet.send(SERVER_ID, "buffer_ready", REDIONET_PROTO.AUDIO_NEXT)
-                                dbgmon("re-send buffer_ready (no timeline yet)")
+                                dbgmon("re-send buffer_ready")
                             end
                         end
-                    elseif state.status == 0 and speaker then
-                        speaker.stop()
-                        next_chunk_id = 1
-                        timeline_origin_ms = nil
-                        buffer_ready_sent = false
-                        buffer_ready_sent_at = nil
+                    elseif state.status == 0 then
+                        hard_reset_local()
+                        song_id = nil
                     end
                     os.sleep(DRIFT_CHECK_SEC)
                 end
@@ -342,16 +393,8 @@ function M.loop()
 
             function()
                 local id = rednet.receive(REDIONET_PROTO.AUDIO_HALT)
-                if speaker then speaker.stop() end
-                if http_handle then pcall(http_handle.close) end
-                chunks = {}
+                hard_reset_local()
                 song_id = nil
-                http_handle = nil
-                read_done = false
-                buffer_ready_sent = false
-                buffer_ready_sent_at = nil
-                next_chunk_id = 1
-                timeline_origin_ms = nil
                 os.queueEvent("redionet:local_stop")
                 rednet.send(id, "playback_interrupted", REDIONET_PROTO.AUDIO_NEXT)
             end,

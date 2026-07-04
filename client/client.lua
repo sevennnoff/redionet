@@ -274,11 +274,11 @@ local function client_loop()
                     return
                 end
                 if payload.kind == "prepare" then
-                    os.queueEvent("redionet:prepare_stream", payload.song_id, payload.stream_id)
+                    os.queueEvent("redionet:prepare_stream", payload.song_id, payload.stream_id, payload.session_id)
                 elseif payload.kind == "stop" then
                     speaker.stop()
-                    os.queueEvent("redionet:playback_stopped")
                     os.queueEvent("redionet:local_stop")
+                    os.queueEvent("redionet:playback_stopped")
                 elseif payload.anchor_ms or payload.kind == "timeline" then
                     speaker.stop()
                     os.queueEvent(
@@ -287,7 +287,8 @@ local function client_loop()
                         payload.stream_id,
                         payload.chunk_id,
                         payload.timeline_origin_ms,
-                        payload.server_time_ms
+                        payload.server_time_ms,
+                        payload.session_id
                     )
                 else
                     speaker.stop()
