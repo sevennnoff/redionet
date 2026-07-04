@@ -97,10 +97,6 @@ function M.send_server_volume(volume)
     return M.send_server_player("VOLUME", volume)
 end
 
-function M.send_server_sync()
-    return M.send_server_player("SYNC")
-end
-
 function M.toggle_play_local()
     if CSTATE.is_paused or CSTATE.is_paused == nil then
         CSTATE.is_paused = false

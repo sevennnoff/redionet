@@ -18,7 +18,7 @@ local M = {}
 settings.load()
 M.LOG_LEVEL = settings.get('redionet.log_level', 3)
 
-M.commands_list = {'help', 'reboot', 'reload', 'update', 'sync', 'killlegacy', }
+M.commands_list = {'help', 'reboot', 'reload', 'update', 'killlegacy', }
 M.command_valid = {} -- Set
 for _,v in ipairs(M.commands_list) do M.command_valid[v] = true end
 
@@ -30,7 +30,6 @@ local command_help = {
     ['reboot'] = "Reboot server+clients, may not auto resume.",
     ['reload'] = "Attempt server+clients hot reload.",
     ['update'] = "Fetch updates from GitHub and reload.",
-    ['sync']   = "Force resynchronize audio streams.",
     ['killlegacy'] = "Force reboot legacy clients still using the old protocol set.",
 }
 

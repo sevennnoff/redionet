@@ -54,8 +54,7 @@ config.ui = {
     -- Now Playing Tab
     play_button =   { x = xpos,      y = 6, width = 6, label_play = " Join ", label_stop = " Quit "},
     skip_button =   { x = xpos + 8,  y = 6, width = 6, label = " Skip " }, -- +1 extra gap 
-    sync_button =   { x = xpos + 15, y = 6, width = 6, label = " Sync " },
-    loop_button =   { x = xpos + 22, y = 6, width = 10, labels = { " Loop Off ", " Loop All ", " Loop One " } },
+    loop_button =   { x = xpos + 15, y = 6, width = 10, labels = { " Loop Off ", " Loop All ", " Loop One " } },
     volume_slider = { x = xpos,      y = 8, width = 25 },
     queue = { start_y = 10, height = 2 },
 
@@ -77,13 +76,11 @@ config.ui = {
 config.pocket_ui = {
     server_play_button = {x = config.term_width - 2, y = 1, width = 2, label_play = " \16", label_stop = " \215", label_wait = " \183"},
     skip_button =   { x = xpos,      y = 6, width = 4, label = " \187\187 " },
-    sync_button =   { x = xpos + 5,  y = 6, width = 6, label = " Sync " },
-    loop_button =   { x = xpos + 12, y = 6, width = 9, labels = { " Loop:0 ", " Loop:* ", " Loop:1 " } },
+    loop_button =   { x = xpos + 5,  y = 6, width = 9, labels = { " Loop:0 ", " Loop:* ", " Loop:1 " } },
 }
 if pocket then
     config.ui.server_play_button = config.pocket_ui.server_play_button
     config.ui.skip_button = config.pocket_ui.skip_button
-    config.ui.sync_button = config.pocket_ui.sync_button
     config.ui.loop_button = config.pocket_ui.loop_button
 end
 
@@ -279,12 +276,6 @@ local function draw_now_playing_tab()
 
     btn_cfg = config.ui.skip_button
     term.setTextColor((M.state.ui_enabled and skip_enabled and config.colors.text) or config.colors.btn_text_disabled)
-    term.setCursorPos(btn_cfg.x, btn_cfg.y)
-    term.write(btn_cfg.label)
-
-    -- Sync
-    btn_cfg = config.ui.sync_button
-    term.setTextColor(M.state.ui_enabled and config.colors.text or config.colors.btn_text_disabled)
     term.setCursorPos(btn_cfg.x, btn_cfg.y)
     term.write(btn_cfg.label)
 
@@ -655,17 +646,12 @@ local function handle_click(button, x, y)
                 if is_in_box(x, y, config.ui.skip_button) and skip_enabled then
                     receiver.send_server_player("SKIP")
 
-                elseif is_in_box(x, y, config.ui.sync_button) then
-                    receiver.send_server_sync()
-            
                 elseif is_in_box(x, y, config.ui.loop_button) then
                     M.state.loop_mode = (M.state.loop_mode + 1) % 3
                     receiver.send_server_player("LOOP", M.state.loop_mode)
                 end
             elseif is_in_box(x, y, config.ui.skip_button) and CSTATE.server_state.status > -1 then
                 request_auth(function() receiver.send_server_player("SKIP") end)
-            elseif is_in_box(x, y, config.ui.sync_button) then
-                request_auth(function() receiver.send_server_sync() end)
             elseif is_in_box(x, y, config.ui.loop_button) then
                 local next_loop_mode = (M.state.loop_mode + 1) % 3
                 request_auth(function()

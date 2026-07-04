@@ -240,11 +240,7 @@ local function client_loop()
             function ()
                 local id, command = rednet.receive(REDIONET_PROTO.COMMAND)
 
-                if command == 'sync' then
-                    -- no op, 
-                    -- server broadcasts CLIENT_SYNC
-                
-                elseif command == 'reboot' then
+                if command == 'reboot' then
                     if monitor then monitor.clear() end
                     os.queueEvent('redionet:reboot')
                 
