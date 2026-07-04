@@ -13,6 +13,7 @@ local prog_args = { ... }
 
 
 local BASE_URL = "https://raw.githubusercontent.com/sevennnoff/redionet/refs/heads/main/"
+local INSTALL_VERSION = "2026-07-04-connection-hotfix"
 
 local filemap = {}
 
@@ -250,6 +251,9 @@ local function check_requirements()
 end
 
 local function http_get(url)
+    local url_sep = url:find("?", 1, true) and "&" or "?"
+    url = url .. url_sep .. "rn_v=" .. textutils.urlEncode(INSTALL_VERSION)
+
     local valid_url, error_message = http.checkURL(url)
     if not valid_url then
         printError(('"%s" %s.'):format(url, error_message or "Invalid URL"))
