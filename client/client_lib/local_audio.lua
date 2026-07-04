@@ -20,6 +20,7 @@ local http_handle = nil
 local read_done = false
 local read_start_ms = 0
 local buffer_ready_sent = false
+local buffer_ready_sent_at = nil
 local timeline_origin_ms = nil
 local timeline_stream_id = nil
 local next_chunk_id = 1
@@ -91,6 +92,7 @@ local function start_download(id)
     read_done = false
     read_start_ms = 0
     buffer_ready_sent = false
+    buffer_ready_sent_at = nil
     next_chunk_id = 1
     decoder = dfpwm.make_decoder()
     http.request({ url = net.format_download_url(id), binary = true })
@@ -113,6 +115,7 @@ local function read_one_chunk()
 
     if not buffer_ready_sent and #chunks >= MIN_BUFFER_CHUNKS then
         buffer_ready_sent = true
+        buffer_ready_sent_at = os.epoch("local")
         rednet.send(SERVER_ID, "buffer_ready", REDIONET_PROTO.AUDIO_NEXT)
         dbgmon(("buffer_ready (%d chunks)"):format(#chunks))
     end
@@ -240,6 +243,30 @@ function M.loop()
 
             function()
                 while true do
+                    local _, prep_song_id = os.pullEvent("redionet:prepare_stream")
+                    buffer_ready_sent = false
+                    buffer_ready_sent_at = nil
+                    start_download(prep_song_id or (CSTATE.server_state.active_song_meta and CSTATE.server_state.active_song_meta.id))
+                end
+            end,
+
+            function()
+                while true do
+                    os.pullEvent("redionet:local_stop")
+                    if speaker then speaker.stop() end
+                    if http_handle then pcall(http_handle.close) end
+                    chunks = {}
+                    http_handle = nil
+                    read_done = false
+                    buffer_ready_sent = false
+                    buffer_ready_sent_at = nil
+                    next_chunk_id = 1
+                    timeline_origin_ms = nil
+                end
+            end,
+
+            function()
+                while true do
                     os.pullEvent("redionet:local_read_chunk")
                     if read_one_chunk() and not read_done then
                         os.queueEvent("redionet:local_read_chunk")
@@ -295,11 +322,21 @@ function M.loop()
                                     os.queueEvent("redionet:local_audio_ready")
                                 end
                             end
+                        elseif #chunks >= MIN_BUFFER_CHUNKS and not timeline_origin_ms and buffer_ready_sent_at then
+                            local waited = os.epoch("local") - buffer_ready_sent_at
+                            if waited > 2500 and not buffer_ready_sent then
+                                buffer_ready_sent = true
+                                buffer_ready_sent_at = os.epoch("local")
+                                rednet.send(SERVER_ID, "buffer_ready", REDIONET_PROTO.AUDIO_NEXT)
+                                dbgmon("re-send buffer_ready (no timeline yet)")
+                            end
                         end
                     elseif state.status == 0 and speaker then
                         speaker.stop()
                         next_chunk_id = 1
                         timeline_origin_ms = nil
+                        buffer_ready_sent = false
+                        buffer_ready_sent_at = nil
                     end
                     os.sleep(DRIFT_CHECK_SEC)
                 end
@@ -314,9 +351,10 @@ function M.loop()
                 http_handle = nil
                 read_done = false
                 buffer_ready_sent = false
+                buffer_ready_sent_at = nil
                 next_chunk_id = 1
                 timeline_origin_ms = nil
-                os.queueEvent("redionet:playback_stopped")
+                os.queueEvent("redionet:local_stop")
                 rednet.send(id, "playback_interrupted", REDIONET_PROTO.AUDIO_NEXT)
             end,
 

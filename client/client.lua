@@ -267,20 +267,31 @@ local function client_loop()
             ]]
             function ()
                 local id, payload = rednet.receive(REDIONET_PROTO.CLIENT_SYNC)
-                if speaker then
+                if not speaker then return end
+                if type(payload) ~= "table" then
                     speaker.stop()
-                    if type(payload) == "table" and payload.anchor_ms then
-                        os.queueEvent(
-                            "redionet:timeline_anchor",
-                            payload.anchor_ms,
-                            payload.stream_id,
-                            payload.chunk_id,
-                            payload.timeline_origin_ms,
-                            payload.server_time_ms
-                        )
-                    else
-                        os.queueEvent("redionet:playback_stopped")
-                    end
+                    os.queueEvent("redionet:playback_stopped")
+                    return
+                end
+                if payload.kind == "prepare" then
+                    os.queueEvent("redionet:prepare_stream", payload.song_id, payload.stream_id)
+                elseif payload.kind == "stop" then
+                    speaker.stop()
+                    os.queueEvent("redionet:playback_stopped")
+                    os.queueEvent("redionet:local_stop")
+                elseif payload.anchor_ms or payload.kind == "timeline" then
+                    speaker.stop()
+                    os.queueEvent(
+                        "redionet:timeline_anchor",
+                        payload.start_at_ms or payload.anchor_ms,
+                        payload.stream_id,
+                        payload.chunk_id,
+                        payload.timeline_origin_ms,
+                        payload.server_time_ms
+                    )
+                else
+                    speaker.stop()
+                    os.queueEvent("redionet:playback_stopped")
                 end
             end,
 

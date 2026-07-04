@@ -7,11 +7,13 @@ local chat = require('server_lib.chat')
 
 local AUDIO_CHUNK_SEC = 2.70
 local TICK = 0.050
-local START_LEAD_MS = 1500
-local RESYNC_LEAD_MS = 800
+local START_LEAD_BASE_MS = 1800
+local START_LEAD_PER_CLIENT_MS = 600
+local RESYNC_LEAD_MS = 900
 local TIMELINE_SETTLE_SEC = 0.05
 local STATE_BROADCAST_TICK = 0.20
-local BUFFER_READY_TIMEOUT_MS = 15000
+local BUFFER_READY_BASE_MS = 12000
+local BUFFER_READY_PER_CLIENT_MS = 4000
 
 local M = {}
 
@@ -51,37 +53,82 @@ local function all_active_clients_ready()
     return ready >= expected
 end
 
+local function start_lead_ms()
+    local n = math.max(1, active_listener_count())
+    return START_LEAD_BASE_MS + n * START_LEAD_PER_CLIENT_MS
+end
+
+local function buffer_ready_timeout_ms()
+    local n = math.max(1, active_listener_count())
+    return BUFFER_READY_BASE_MS + n * BUFFER_READY_PER_CLIENT_MS
+end
+
+local function broadcast_prepare()
+    rednet.broadcast({
+        kind = "prepare",
+        stream_id = STATE.active_stream_id,
+        song_id = STATE.active_stream_id,
+    }, REDIONET_PROTO.CLIENT_SYNC)
+end
+
 local function wait_for_client_buffers()
     M.state.waiting_buffer = true
     M.state.clients_ready = {}
+    broadcast_prepare()
+
+    local settle = os.startTimer(0.12)
+    repeat
+        local _, tid = os.pullEvent("timer")
+    until tid == settle
+    os.cancelTimer(settle)
+
     os.queueEvent('redionet:broadcast_state', 'await buffer_ready')
 
-    local deadline = os.epoch("local") + BUFFER_READY_TIMEOUT_MS
+    local deadline = os.epoch("local") + buffer_ready_timeout_ms()
     while os.epoch("local") < deadline do
-        if all_active_clients_ready() then break end
+        if STATE.data.status ~= 1 then
+            M.state.waiting_buffer = false
+            return false
+        end
+        if all_active_clients_ready() then
+            M.state.waiting_buffer = false
+            return true
+        end
         os.sleep(TICK)
     end
 
     M.state.waiting_buffer = false
-    if not all_active_clients_ready() then
-        chat.log_message('buffer_ready timeout, starting anyway', 'WARN')
-    end
+    chat.log_message(('buffer_ready timeout (%d/%d ready)'):format(
+        (function()
+            local r = 0
+            for id, st in pairs(M.state.receiver_stats) do
+                if st == 1 and M.state.clients_ready[id] then r = r + 1 end
+            end
+            return r
+        end)(),
+        active_listener_count()), 'WARN')
+    return false
 end
 
 --- Broadcast timeline anchor; clients seek to chunk_id / audio_position_sec.
 function M.arm_timeline(is_new_stream, chunk_id, audio_position_sec)
-    local lead_ms = is_new_stream and START_LEAD_MS or RESYNC_LEAD_MS
+    local lead_ms = is_new_stream and start_lead_ms() or RESYNC_LEAD_MS
     local position_ms = math.floor((audio_position_sec or 0) * 1000 + 0.5)
-    M.state.timeline_origin_ms = os.epoch("local") + lead_ms - position_ms
+    local start_at_ms = os.epoch("local") + lead_ms
+    M.state.timeline_origin_ms = start_at_ms - position_ms
     STATE.data.timeline_origin_ms = M.state.timeline_origin_ms
     STATE.data.audio_position_sec = audio_position_sec or 0
     STATE.audio_position_epoch_ms = os.epoch("local")
     STATE.data.audio_position_epoch_ms = STATE.audio_position_epoch_ms
     STATE.data.server_time_ms = os.epoch("local")
 
+    chat.log_message(('Timeline: %d clients, start in %dms at %0.3f'):format(
+        active_listener_count(), lead_ms, start_at_ms / 1000), 'INFO')
+
     rednet.broadcast({
         kind = "timeline",
-        anchor_ms = M.state.timeline_origin_ms + position_ms,
+        anchor_ms = start_at_ms,
+        start_at_ms = start_at_ms,
         timeline_origin_ms = M.state.timeline_origin_ms,
         stream_id = STATE.active_stream_id,
         chunk_id = chunk_id or 1,
@@ -120,12 +167,13 @@ local function run_timeline_playback(song_meta)
 
     while STATE.data.status == 1 and STATE.active_stream_id == song_meta.id do
         if M.state.need_sync then
-            wait_for_client_buffers()
-            local pos = STATE.data.audio_position_sec or 0
-            local chunk_id = math.max(1, math.floor(pos / AUDIO_CHUNK_SEC) + 1)
-            M.arm_timeline(pos < 0.01, chunk_id, pos)
+            if wait_for_client_buffers() and STATE.data.status == 1 then
+                local pos = STATE.data.audio_position_sec or 0
+                local chunk_id = math.max(1, math.floor(pos / AUDIO_CHUNK_SEC) + 1)
+                M.arm_timeline(pos < 0.01, chunk_id, pos)
+                M.state.clients_ready = {}
+            end
             M.state.need_sync = false
-            M.state.clients_ready = {}
             os.queueEvent('redionet:broadcast_state', 'arm_timeline')
         end
 
@@ -204,15 +252,21 @@ function M.play_song(song_meta)
 end
 
 function M.stop_song()
+    M.state.need_sync = false
+    M.state.waiting_buffer = false
+    M.state.clients_ready = {}
+    rednet.broadcast({ kind = "stop" }, REDIONET_PROTO.CLIENT_SYNC)
     rednet.broadcast("audio.stop_song", REDIONET_PROTO.AUDIO_HALT)
     os.queueEvent("redionet:playback_stopped")
     STATE.active_stream_id = nil
     STATE.data.status = 0
     STATE.data.audio_position_sec = 0
     STATE.data.timeline_origin_ms = nil
+    M.state.timeline_origin_ms = nil
     STATE.audio_position_epoch_ms = nil
     STATE.data.audio_position_epoch_ms = nil
-    STATE.data.server_time_ms = nil
+    STATE.data.server_time_ms = os.epoch("local")
+    os.queueEvent('redionet:broadcast_state', 'stop_song')
 end
 
 function M.skip_song()
@@ -261,6 +315,10 @@ function M.audio_loop()
                 local id, msg = rednet.receive(REDIONET_PROTO.AUDIO_NEXT)
                 if msg == "buffer_ready" then
                     M.state.clients_ready[id] = true
+                    if STATE.data.status == 1 and not M.state.waiting_buffer then
+                        M.state.need_sync = true
+                        chat.log_message(('Client #%d ready late, resync scheduled'):format(id), 'INFO')
+                    end
                 end
             end
         end,
