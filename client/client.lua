@@ -124,6 +124,7 @@ local function setup_server_connection()
     parallel.waitForAny(ui.loading_animation(), function ()
         local payload, code
         repeat
+            os.sleep(0.5)
             id = rednet.lookup('PROTO_SERVER')
             if id then
                 rednet.send(id, "CONFIG", 'PROTO_SERVER')
@@ -132,8 +133,6 @@ local function setup_server_connection()
                 if payload then
                     code, server_settings = table.unpack(payload)
                 end
-            else
-                os.sleep(0.5)
             end
         until code == "CONFIG"
     end)
