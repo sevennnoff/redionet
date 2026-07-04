@@ -16,7 +16,7 @@ Synchronized, server-wide music streaming with ComputerCraft.
 ## Installation
 Option 1: `pastebin`
 ```sh
-pastebin run TH0EPrX0
+pastebin run Fe4MDC1Y
 ```
 
 Option 2: `wget` 
