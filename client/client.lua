@@ -30,6 +30,7 @@ CSTATE = {
     error_status = false,       -- SEARCH_ERROR, false
     server_state = {
         active_song_meta = nil,
+        audio_position_sec = 0,
         queue = {},
         is_loading = false,
         loop_mode = 0,

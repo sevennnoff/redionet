@@ -54,7 +54,8 @@ config.ui = {
     -- Now Playing Tab
     play_button =   { x = xpos,      y = 6, width = 6, label_play = " Join ", label_stop = " Quit "},
     skip_button =   { x = xpos + 8,  y = 6, width = 6, label = " Skip " }, -- +1 extra gap 
-    loop_button =   { x = xpos + 15, y = 6, width = 10, labels = { " Loop Off ", " Loop All ", " Loop One " } },
+    sync_button =   { x = xpos + 15, y = 6, width = 6, label = " Sync " },
+    loop_button =   { x = xpos + 22, y = 6, width = 10, labels = { " Loop Off ", " Loop All ", " Loop One " } },
     volume_slider = { x = xpos,      y = 8, width = 25 },
     queue = { start_y = 10, height = 2 },
 
@@ -75,9 +76,15 @@ config.ui = {
 -- Pocket overrides
 config.pocket_ui = {
     server_play_button = {x = config.term_width - 2, y = 1, width = 2, label_play = " \16", label_stop = " \215", label_wait = " \183"},
+    skip_button =   { x = xpos,      y = 6, width = 4, label = " \187\187 " },
+    sync_button =   { x = xpos + 5,  y = 6, width = 6, label = " Sync " },
+    loop_button =   { x = xpos + 12, y = 6, width = 9, labels = { " Loop:0 ", " Loop:* ", " Loop:1 " } },
 }
 if pocket then
     config.ui.server_play_button = config.pocket_ui.server_play_button
+    config.ui.skip_button = config.pocket_ui.skip_button
+    config.ui.sync_button = config.pocket_ui.sync_button
+    config.ui.loop_button = config.pocket_ui.loop_button
 end
 
 
@@ -93,7 +100,7 @@ M.state.clicked_result_index = nil
 M.state.loop_mode = 0 -- Local only
 M.state.ui_enabled = false -- server control enabled after password auth
 
-M.state.now_playing_seconds = 0
+M.state.now_playing_song_id = nil
 M.state.now_playing_artist_line = nil
 
 -- running client in new tab will show a half result if round up
@@ -173,15 +180,27 @@ local function draw_tabs_bar()
     term.write(status_label)
 end
 
-local function write_time_artist(artist_line)
+local function write_time_artist(song_meta)
+    local artist_line
+
+    if type(song_meta) == "table" then
+        artist_line = song_meta.artist
+        if song_meta.id ~= M.state.now_playing_song_id then
+            M.state.now_playing_song_id = song_meta.id
+            M.state.now_playing_artist_line = nil
+        end
+    else
+        artist_line = song_meta
+    end
+
     if artist_line and artist_line ~= M.state.now_playing_artist_line then
-        M.state.now_playing_seconds = 0
         M.state.now_playing_artist_line = artist_line
     end
 
     if M.state.now_playing_artist_line then
         -- NOTE: will be malformed if somehow audio longer than 1hr manages to play.
-        local timefmt = ('%d:%02d'):format(math.floor(M.state.now_playing_seconds / 60), math.floor(M.state.now_playing_seconds % 60))
+        local seconds = CSTATE.server_state.audio_position_sec or 0
+        local timefmt = ('%d:%02d'):format(math.floor(seconds / 60), math.floor(seconds % 60))
         set_colors(config.colors.text_secondary, config.colors.bg)
         term.setCursorPos(config.ui.xpos, 4)
         term.write(("%s/%s"):format(timefmt, M.state.now_playing_artist_line))
@@ -197,7 +216,7 @@ local function draw_now_playing_tab()
         term.setTextColor(config.colors.text)
         term.setCursorPos(config.ui.xpos, 3)
         term.write(active_song_meta.name)
-        write_time_artist(active_song_meta.artist)
+        write_time_artist(active_song_meta)
     else
         term.setTextColor(config.colors.text_secondary)
         term.setCursorPos(config.ui.xpos, 3)
@@ -260,6 +279,12 @@ local function draw_now_playing_tab()
 
     btn_cfg = config.ui.skip_button
     term.setTextColor((M.state.ui_enabled and skip_enabled and config.colors.text) or config.colors.btn_text_disabled)
+    term.setCursorPos(btn_cfg.x, btn_cfg.y)
+    term.write(btn_cfg.label)
+
+    -- Sync
+    btn_cfg = config.ui.sync_button
+    term.setTextColor(M.state.ui_enabled and config.colors.text or config.colors.btn_text_disabled)
     term.setCursorPos(btn_cfg.x, btn_cfg.y)
     term.write(btn_cfg.label)
 
@@ -629,6 +654,9 @@ local function handle_click(button, x, y)
 
                 if is_in_box(x, y, config.ui.skip_button) and skip_enabled then
                     receiver.send_server_player("SKIP")
+
+                elseif is_in_box(x, y, config.ui.sync_button) then
+                    receiver.send_server_sync()
             
                 elseif is_in_box(x, y, config.ui.loop_button) then
                     M.state.loop_mode = (M.state.loop_mode + 1) % 3
@@ -636,6 +664,8 @@ local function handle_click(button, x, y)
                 end
             elseif is_in_box(x, y, config.ui.skip_button) and CSTATE.server_state.status > -1 then
                 request_auth(function() receiver.send_server_player("SKIP") end)
+            elseif is_in_box(x, y, config.ui.sync_button) then
+                request_auth(function() receiver.send_server_sync() end)
             elseif is_in_box(x, y, config.ui.loop_button) then
                 local next_loop_mode = (M.state.loop_mode + 1) % 3
                 request_auth(function()
@@ -802,11 +832,8 @@ function M.ui_loop()
 
                 function ()
                     while true do
-                        _, M.state.now_playing_seconds = os.pullEvent("redionet:audio_timestamp")
-
-                        if M.state.active_tab == 1 then
-                            write_time_artist()
-                        end
+                        os.sleep(1)
+                        receiver.update_server_state()
                     end
                 end
             )

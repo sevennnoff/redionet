@@ -76,7 +76,7 @@ function M.send_server_queue(result, code)
     return true
 end
 
----@param code string [TOGGLE, SKIP, LOOP, VOLUME, STATE]
+---@param code string [TOGGLE, SKIP, LOOP, VOLUME, SYNC, STATE]
 ---@param loop_mode? number loop mode [0,1,2] for server playback (only applicable for code=LOOP)
 function M.send_server_player(code, loop_mode)
     if code ~= "STATE" and not can_control() then return false end
@@ -87,6 +87,10 @@ end
 
 function M.send_server_volume(volume)
     return M.send_server_player("VOLUME", volume)
+end
+
+function M.send_server_sync()
+    return M.send_server_player("SYNC")
 end
 
 function M.toggle_play_local()

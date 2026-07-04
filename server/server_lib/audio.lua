@@ -23,7 +23,11 @@ M.state = {
     prefill_end = true,
 }
 
-local speaker_cache_target = AUDIO_CHUNK_SEC/2 -- sec of audio stored in speakers at anytime. Higher = latency desync protection. Lower = reduced resync audio gaps
+-- Keep enough audio queued in speakers to survive short server/rednet stalls,
+-- but do not let one slow client hold the next chunk long enough to underrun everyone.
+local speaker_cache_target = AUDIO_CHUNK_SEC * 0.75
+local client_response_timeout = 0.85
+local first_response_timeout = AUDIO_CHUNK_SEC
 
 local previous = {
     req_chunk_times = {},
@@ -180,6 +184,8 @@ local function transmit_audio(data_buffer)
         audio_position_sec = previous.audio_position_sec,
     }
     previous.audio_position_sec = previous.audio_position_sec + audio_dur_sec
+    STATE.data.audio_position_sec = sub_state.audio_position_sec
+    STATE.audio_position_epoch_ms = os.epoch("local")
 
     if M.state.n_receivers == 0 then
         chat.log_message('No visible client connections... Stopping', 'WARN')
@@ -208,8 +214,8 @@ local function transmit_audio(data_buffer)
         }
         for id,status in pairs(M.state.receiver_stats) do istate.receiver_stats[id] = status end
         
-        local timeout = speaker_cache_target
-        local timer,tid
+        local timeout = client_response_timeout
+        local timer, fallback_timer, tid
 
         parallel.waitForAny(
             function ()
@@ -221,6 +227,7 @@ local function transmit_audio(data_buffer)
                 rednet.broadcast({audio_chunk, sub_state}, 'PROTO_AUDIO')
                 -- time_audio_sent = os.epoch("ingame")
                 time_audio_sent = os.epoch("local")
+                fallback_timer = os.startTimer(first_response_timeout)
                 
                 while true do os.pullEvent() end -- never return
             end,
@@ -234,7 +241,8 @@ local function transmit_audio(data_buffer)
                     if not timer then
                         -- local first_responce_sec = (os.epoch('ingame') - time_audio_sent )/(Gms*1000)
                         local first_responce_sec = (os.epoch('local') - time_audio_sent )/1000
-                        timer = os.startTimer(timeout )-- first_responce_sec)
+                        if fallback_timer then os.cancelTimer(fallback_timer) end
+                        timer = os.startTimer(timeout)-- first_responce_sec)
                         chat.log_message(('First responce: %0.3fs'):format(first_responce_sec), "DEBUG")
                     end
                     
@@ -265,7 +273,9 @@ local function transmit_audio(data_buffer)
             end,
 
             function ()
-                repeat _,tid = os.pullEvent('timer') until timer and tid == timer
+                repeat
+                    _,tid = os.pullEvent('timer')
+                until (timer and tid == timer) or (fallback_timer and tid == fallback_timer)
                 
                 -- The *Only* time we remove a client is when it was present in the initial state, but missing from final state.
                 -- We don't want to completely overwrite audio state because there may be new pending client connections 
@@ -277,11 +287,14 @@ local function transmit_audio(data_buffer)
                         chat.log_message(('Client #%d timed out'):format(id), 'WARN')
                     end
                 end
-                -- chat.log_message('client time out', 'WARN')
+                if tid == fallback_timer then
+                    chat.log_message('No client acknowledged audio chunk before timeout', 'WARN')
+                end
             end
         )
 
         if timer then os.cancelTimer(timer) end
+        if fallback_timer then os.cancelTimer(fallback_timer) end
 
     end
 
@@ -399,6 +412,8 @@ local function set_state_queue_empty()
     end
     
     STATE.data.active_song_meta = nil
+    STATE.data.audio_position_sec = 0
+    STATE.audio_position_epoch_ms = nil
 
     STATE.data.is_loading = false
     STATE.data.error_status = false
@@ -435,6 +450,8 @@ function M.play_song(song_meta)
         end
 
         STATE.data.active_song_meta = song_meta -- overwrite current meta (may be identical)
+        STATE.data.audio_position_sec = 0
+        STATE.audio_position_epoch_ms = nil
     end
 
     STATE.data.status = 1 -- needs to be at end to overwrite stop_song()
@@ -447,6 +464,8 @@ function M.stop_song()
     os.queueEvent("redionet:playback_stopped") -- pulled by process_audio_data
     STATE.active_stream_id = nil
     STATE.data.status = 0
+    STATE.data.audio_position_sec = 0
+    STATE.audio_position_epoch_ms = nil
 end
 
 function M.skip_song()

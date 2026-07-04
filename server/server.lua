@@ -34,6 +34,7 @@ STATE = {
     -- Audio Network State
     active_stream_id = nil,     -- The MOST important server state value. active_stream_id ~= nil <=> active audio transmission. Excluded from STATE.data to avoid clients ever having stale copy
     response_handle = nil,      -- ReadHandle from http.request containing binary song data. Non-serializable object
+    audio_position_epoch_ms = nil,
 
     -- state that clients receive
     data = {
@@ -41,6 +42,7 @@ STATE = {
         status = -1,            -- -1=cannot_play/empty/waiting, 0=stopped, 1=streaming 
         queue = {},             -- song queue, list of objects like active_song_meta
         active_song_meta = nil, -- Metadata for the song in the player {id=str, name=str, artist=str, duration={H=int, M=int, S=int}}
+        audio_position_sec = 0, -- current server playback position
         loop_mode = 0,          -- 0: Off, 1: Queue/List, 2: Song
         volume = 1.5,           -- server-wide volume, value between 0 and 3
         controller_id = nil,    -- client id that entered the control password
@@ -56,6 +58,11 @@ STATE = {
 ---@param caller_info? string origin debugging info to log
 local function broadcast_state(caller_info)
     chat.log_message(('broadcast_state: %s'):format(caller_info), 'DEBUG')
+    if STATE.data.status == 1 and STATE.audio_position_epoch_ms then
+        local elapsed_sec = (os.epoch("local") - STATE.audio_position_epoch_ms) / 1000
+        STATE.data.audio_position_sec = math.max(0, STATE.data.audio_position_sec + elapsed_sec)
+        STATE.audio_position_epoch_ms = os.epoch("local")
+    end
     -- event data is always copied, client-side mutability not a concern
     rednet.broadcast(STATE.data, 'PROTO_SERVER_STATE')
 end
@@ -81,6 +88,7 @@ local function restore_state(filename)
         STATE.data.status           = state_data.status
         STATE.data.queue            = state_data.queue
         STATE.data.active_song_meta = state_data.active_song_meta
+        STATE.data.audio_position_sec = 0
         STATE.data.loop_mode        = state_data.loop_mode
         STATE.data.volume           = state_data.volume or STATE.data.volume
         -- network status info ignored, irrelevant after reset
@@ -211,6 +219,9 @@ local function server_loop()
                     elseif code == "VOLUME" then
                         STATE.data.volume = math.max(0, math.min(3, tonumber(payload) or STATE.data.volume))
                         os.queueEvent('redionet:broadcast_state', "PROTO_SERVER_PLAYER: VOLUME")
+                    elseif code == "SYNC" then
+                        audio.state.need_sync = true
+                        os.queueEvent('redionet:broadcast_state', "PROTO_SERVER_PLAYER: SYNC")
                     end
                 end
             end,
