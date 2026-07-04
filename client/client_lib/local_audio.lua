@@ -14,6 +14,9 @@ local MIN_BUFFER_CHUNKS = 2
 local DRIFT_RESYNC_MS = 800
 local DRIFT_CHECK_SEC = 0.20
 local DOWNLOAD_RETRIES = 3
+local STREAM_RETRIES = 3
+local SILENT_WATCHDOG_MS = 3500
+local SILENT_LAG_SEC = 2.0
 
 local chunks = {}
 local song_id = nil
@@ -24,6 +27,9 @@ local read_start_ms = 0
 local buffer_ready_sent = false
 local buffer_ready_sent_at = nil
 local download_attempts = 0
+local stream_retry_attempts = 0
+local pending_seek_sec = nil
+local silent_since_ms = nil
 local timeline_origin_ms = nil
 local timeline_stream_id = nil
 local next_chunk_id = 1
@@ -70,10 +76,24 @@ local function hard_reset_local()
     buffer_ready_sent = false
     buffer_ready_sent_at = nil
     download_attempts = 0
+    stream_retry_attempts = 0
+    pending_seek_sec = nil
+    silent_since_ms = nil
     next_chunk_id = 1
     timeline_origin_ms = nil
     timeline_stream_id = nil
     decoder = dfpwm.make_decoder()
+end
+
+local function song_duration_ms()
+    local meta = CSTATE.server_state.active_song_meta
+    if not meta or not meta.duration then return math.huge end
+    local d = meta.duration
+    return (d.H * 3600 + d.M * 60 + d.S) * 1000
+end
+
+local function stream_incomplete()
+    return read_start_ms + 1000 < song_duration_ms()
 end
 
 local function reset_playback(stream_id, chunk_id, origin_ms, new_session_id)
@@ -135,6 +155,9 @@ local function read_one_chunk()
         read_done = true
         pcall(http_handle.close)
         http_handle = nil
+        if stream_incomplete() then
+            os.queueEvent("redionet:local_stream_retry", "read_eof")
+        end
         return false
     end
 
@@ -147,6 +170,8 @@ local function read_one_chunk()
         rednet.send(SERVER_ID, "buffer_ready", REDIONET_PROTO.AUDIO_NEXT)
         dbgmon(("buffer_ready (%d chunks)"):format(#chunks))
     end
+
+    apply_pending_seek()
 
     return true
 end
@@ -219,6 +244,43 @@ local function schedule_play()
     end
 end
 
+local function apply_pending_seek()
+    if pending_seek_sec and #chunks >= MIN_BUFFER_CHUNKS then
+        local target = pending_seek_sec
+        pending_seek_sec = nil
+        if seek_to_position(target) then
+            dbgmon(("seek after retry %0.2fs"):format(target))
+            schedule_play()
+        end
+    end
+end
+
+local function restart_stream_download(reason)
+    if not song_id then return false end
+    if stream_retry_attempts >= STREAM_RETRIES then
+        dbgmon("stream retries exhausted: " .. reason)
+        rednet.send(SERVER_ID, "playback_stalled", REDIONET_PROTO.AUDIO_NEXT)
+        return false
+    end
+
+    stream_retry_attempts = stream_retry_attempts + 1
+    pending_seek_sec = target_position_sec()
+    dbgmon(("stream retry (%s) -> %0.2fs"):format(reason, pending_seek_sec))
+
+    if http_handle then pcall(http_handle.close) end
+    chunks = {}
+    http_handle = nil
+    read_done = false
+    read_start_ms = 0
+    buffer_ready_sent = false
+    buffer_ready_sent_at = nil
+    download_attempts = 0
+    decoder = dfpwm.make_decoder()
+
+    http.request({ url = net.format_download_url(song_id), binary = true })
+    return true
+end
+
 local function play_next_chunk()
     if not speaker or CSTATE.is_paused or not timeline_origin_ms then return end
     if CSTATE.server_state.status ~= 1 then return end
@@ -227,6 +289,8 @@ local function play_next_chunk()
         if not read_done then
             os.sleep(0.05)
             schedule_play()
+        elseif stream_incomplete() then
+            os.queueEvent("redionet:local_stream_retry", "buffer_starved")
         end
         return
     end
@@ -253,6 +317,8 @@ local function play_next_chunk()
 
     local buffer = decoder(entry.data)
     play_audio(buffer, CSTATE.server_state.volume or 1.5)
+    silent_since_ms = nil
+    stream_retry_attempts = 0
     os.queueEvent("redionet:audio_timestamp", entry.start_ms / 1000)
     next_chunk_id = next_chunk_id + 1
     schedule_play()
@@ -328,6 +394,13 @@ function M.loop()
 
             function()
                 while true do
+                    local _, reason = os.pullEvent("redionet:local_stream_retry")
+                    restart_stream_download(reason or "unknown")
+                end
+            end,
+
+            function()
+                while true do
                     local _, anchor_ms, stream_id, chunk_id, origin_ms, server_time_ms, new_session_id =
                         os.pullEvent("redionet:timeline_anchor")
                     sync_clock(server_time_ms)
@@ -373,7 +446,16 @@ function M.loop()
                                     dbgmon(("drift fix %0.2fs"):format(target))
                                     schedule_play()
                                 end
-                            elseif next_chunk_id > #chunks and not read_done then
+                            elseif target - local_sec > SILENT_LAG_SEC then
+                                silent_since_ms = silent_since_ms or os.epoch("local")
+                                if os.epoch("local") - silent_since_ms > SILENT_WATCHDOG_MS then
+                                    silent_since_ms = nil
+                                    os.queueEvent("redionet:local_stream_retry", "watchdog")
+                                end
+                            else
+                                silent_since_ms = nil
+                            end
+                            if next_chunk_id > #chunks and not read_done then
                                 schedule_play()
                             end
                         elseif #chunks >= MIN_BUFFER_CHUNKS and not timeline_origin_ms and buffer_ready_sent_at then

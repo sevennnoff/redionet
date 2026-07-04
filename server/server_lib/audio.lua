@@ -363,6 +363,14 @@ function M.audio_loop()
                 elseif msg == "buffer_failed" then
                     M.state.clients_failed[id] = true
                     chat.log_message(('Client #%d download failed'):format(id), 'WARN')
+                    if STATE.data.status == 1 and not M.state.waiting_buffer then
+                        M.state.need_sync = true
+                    end
+                elseif msg == "playback_stalled" then
+                    chat.log_message(('Client #%d playback stalled'):format(id), 'WARN')
+                    if STATE.data.status == 1 and not M.state.waiting_buffer then
+                        M.state.need_sync = true
+                    end
                 end
             end
         end,
