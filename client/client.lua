@@ -118,24 +118,24 @@ local function warn_speaker()
 end
 
 local function setup_server_connection()
-    write('Waiting for server connection... ')
+    write('Waiting for server connection')
     local id, server_settings
 
-    parallel.waitForAny(ui.loading_animation(), function ()
-        local payload, code
-        repeat
-            os.sleep(0.5)
-            id = rednet.lookup('PROTO_SERVER')
-            if id then
-                rednet.send(id, "CONFIG", 'PROTO_SERVER')
+    local payload, code
+    repeat
+        write(".")
+        rednet.broadcast("CONFIG", 'PROTO_SERVER')
 
-                id, payload = rednet.receive('PROTO_SERVER:REPLY', 1.0)
-                if payload then
-                    code, server_settings = table.unpack(payload)
-                end
+        id, payload = rednet.receive('PROTO_SERVER:REPLY', 1.0)
+        if payload then
+            code, server_settings = table.unpack(payload)
+            if code ~= "CONFIG" then
+                server_settings = nil
             end
-        until code == "CONFIG"
-    end)
+        end
+    until code == "CONFIG"
+
+    write("\n")
 
     SERVER_ID = id
 
