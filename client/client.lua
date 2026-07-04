@@ -269,12 +269,14 @@ local function client_loop()
                 (Peer|Server) Message -> Client Event 
             ]]
             function ()
-                -- flush the other speaker buffers whenever a client resumes play
-                -- this forces all clients to remain in sync
-                local id = rednet.receive(REDIONET_PROTO.CLIENT_SYNC)
+                local id, payload = rednet.receive(REDIONET_PROTO.CLIENT_SYNC)
                 if speaker then
                     speaker.stop()
-                    os.queueEvent("redionet:playback_stopped")
+                    if type(payload) == "table" and payload.anchor_ms then
+                        os.queueEvent("redionet:timeline_anchor", payload.anchor_ms, payload.stream_id)
+                    else
+                        os.queueEvent("redionet:playback_stopped")
+                    end
                 end
             end,
 

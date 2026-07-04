@@ -254,7 +254,6 @@ local function server_loop()
                         os.queueEvent('redionet:broadcast_state', "SERVER_PLAYER: VOLUME")
                     elseif code == "SYNC" then
                         audio.state.need_sync = true
-                        audio.state.speaker_cache = 0
                         os.queueEvent('redionet:sync')
                         os.queueEvent('redionet:broadcast_state', "SERVER_PLAYER: SYNC")
                     end
@@ -297,7 +296,6 @@ local function server_event_loop()
                     chat.show_help()
                 elseif cmd == 'sync' then
                     audio.state.need_sync = true
-                    audio.state.speaker_cache = 0
                     os.queueEvent('redionet:sync')
                 elseif cmd == 'killlegacy' then
                     os.queueEvent('redionet:killlegacy')
@@ -309,8 +307,12 @@ local function server_event_loop()
 
             function()
                 os.pullEvent('redionet:sync')
-                audio.state.speaker_cache = 0
-                rednet.broadcast('sync', REDIONET_PROTO.CLIENT_SYNC)
+                if STATE.active_stream_id then
+                    audio.arm_timeline(false)
+                    audio.state.need_sync = false
+                else
+                    rednet.broadcast({ kind = "sync" }, REDIONET_PROTO.CLIENT_SYNC)
+                end
             end,
 
             function()
