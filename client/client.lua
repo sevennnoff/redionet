@@ -32,7 +32,6 @@ REDIONET_PROTO = {
 
 local ui = require("client_lib.ui")
 local receiver = require("client_lib.receiver")
-local local_audio = require("client_lib.local_audio")
 local net = require('client_lib.net')
 
 
@@ -241,7 +240,10 @@ local function client_loop()
             function ()
                 local id, command = rednet.receive(REDIONET_PROTO.COMMAND)
 
-                if command == 'reboot' then
+                if command == 'sync' then
+                    -- server broadcasts CLIENT_SYNC to flush speaker buffers
+
+                elseif command == 'reboot' then
                     if monitor then monitor.clear() end
                     os.queueEvent('redionet:reboot')
                 
@@ -266,31 +268,8 @@ local function client_loop()
                 (Peer|Server) Message -> Client Event 
             ]]
             function ()
-                local id, payload = rednet.receive(REDIONET_PROTO.CLIENT_SYNC)
-                if not speaker then return end
-                if type(payload) ~= "table" then
-                    speaker.stop()
-                    os.queueEvent("redionet:playback_stopped")
-                    return
-                end
-                if payload.kind == "prepare" then
-                    os.queueEvent("redionet:prepare_stream", payload.song_id, payload.stream_id, payload.session_id)
-                elseif payload.kind == "stop" then
-                    speaker.stop()
-                    os.queueEvent("redionet:local_stop")
-                    os.queueEvent("redionet:playback_stopped")
-                elseif payload.anchor_ms or payload.kind == "timeline" then
-                    speaker.stop()
-                    os.queueEvent(
-                        "redionet:timeline_anchor",
-                        payload.start_at_ms or payload.anchor_ms,
-                        payload.stream_id,
-                        payload.chunk_id,
-                        payload.timeline_origin_ms,
-                        payload.server_time_ms,
-                        payload.session_id
-                    )
-                else
+                rednet.receive(REDIONET_PROTO.CLIENT_SYNC)
+                if speaker then
                     speaker.stop()
                     os.queueEvent("redionet:playback_stopped")
                 end
@@ -352,7 +331,7 @@ else
     parallel.waitForAny(
         system_stop_event,
         client_loop,
-        local_audio.loop
+        receiver.receive_loop
     )
 end
 

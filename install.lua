@@ -13,7 +13,7 @@ local prog_args = { ... }
 
 
 local BASE_URL = "https://raw.githubusercontent.com/sevennnoff/redionet/refs/heads/main/"
-local INSTALL_VERSION = "2026-07-05-stream-recovery"
+local INSTALL_VERSION = "2026-07-05-barrier-restore"
 
 local filemap = {}
 
@@ -28,7 +28,6 @@ filemap["server"] = {
 filemap["client"] = {
     ["./client.lua"] = BASE_URL ..              "client/client.lua",
     ["./client_lib/net.lua"] = BASE_URL ..      "client/client_lib/net.lua",
-    ["./client_lib/local_audio.lua"] = BASE_URL .. "client/client_lib/local_audio.lua",
     ["./client_lib/receiver.lua"] = BASE_URL .. "client/client_lib/receiver.lua",
     ["./client_lib/ui.lua"] = BASE_URL ..       "client/client_lib/ui.lua",
 }
@@ -36,7 +35,6 @@ filemap["client"] = {
 filemap["controller"] = {
     ["./client.lua"] = BASE_URL ..              "client/client.lua",
     ["./client_lib/net.lua"] = BASE_URL ..      "client/client_lib/net.lua",
-    ["./client_lib/local_audio.lua"] = BASE_URL .. "client/client_lib/local_audio.lua",
     ["./client_lib/receiver.lua"] = BASE_URL .. "client/client_lib/receiver.lua",
     ["./client_lib/ui.lua"] = BASE_URL ..       "client/client_lib/ui.lua",
 }

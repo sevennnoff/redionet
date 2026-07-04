@@ -264,6 +264,11 @@ local function server_loop()
                     elseif code == "VOLUME" then
                         STATE.data.volume = math.max(0, math.min(3, tonumber(payload) or STATE.data.volume))
                         os.queueEvent('redionet:broadcast_state', "SERVER_PLAYER: VOLUME")
+                    elseif code == "SYNC" then
+                        audio.state.need_sync = true
+                        audio.state.speaker_cache = 0
+                        os.queueEvent('redionet:sync')
+                        os.queueEvent('redionet:broadcast_state', "SERVER_PLAYER: SYNC")
                     end
                 end
             end,
@@ -302,12 +307,22 @@ local function server_event_loop()
                 if cmd == 'help' then
                     -- TODO: bypass issue_command, keep all help display logic in chat module 
                     chat.show_help()
+                elseif cmd == 'sync' then
+                    audio.state.need_sync = true
+                    audio.state.speaker_cache = 0
+                    os.queueEvent('redionet:sync')
                 elseif cmd == 'killlegacy' then
                     os.queueEvent('redionet:killlegacy')
                 else
                     rednet.broadcast(cmd, REDIONET_PROTO.COMMAND)
                     os.queueEvent(('redionet:%s'):format(cmd))
                 end
+            end,
+
+            function()
+                os.pullEvent('redionet:sync')
+                audio.state.speaker_cache = 0
+                rednet.broadcast('sync', REDIONET_PROTO.CLIENT_SYNC)
             end,
 
             function()
