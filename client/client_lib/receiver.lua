@@ -3,16 +3,19 @@
     Handles server communications and audio playback.
 ]]
 
+local dfpwm = require("cc.audio.dfpwm")
+
 local speaker = peripheral.find("speaker")
+local decoder = dfpwm.make_decoder()
+local expected_chunk_id = nil
 
 
-local dbgmon = function (message) end -- debugging func is no op unless conditions are met
+local dbgmon = function (message) end
 
 local function debug_init()
-    settings.load() -- lazy to allow client to inherit from server config as needed
+    settings.load()
     local monitor = peripheral.find("monitor")
 
-    -- dbgmon redefine conditions: monitor available and log level == debug
     if (monitor and settings.get('redionet.log_level', 3) == 1) then
         local pp = require('cc.pretty')
         monitor.setTextScale(0.5)
@@ -36,17 +39,17 @@ end
 
 local M = {}
 
----Update local server state cache
----@param blocking? boolean if true, force an update before proceeding, otherwise queue event 
+local function reset_playback_cursor()
+    expected_chunk_id = nil
+end
+
 function M.update_server_state(blocking)
     if blocking then
-        -- get current server state on join
         rednet.send(SERVER_ID, {"STATE", nil}, REDIONET_PROTO.SERVER_PLAYER)
         local id, server_state = rednet.receive(REDIONET_PROTO.SERVER_STATE)
         CSTATE.server_state = server_state
         CSTATE.is_authorized = server_state.controller_id == CLIENT_ID
         CSTATE.state_received_epoch_ms = os.epoch("local")
-
     else
         os.queueEvent('redionet:sync_state')
     end
@@ -67,18 +70,14 @@ local function can_control()
     return CSTATE.is_authorized
 end
 
----@param result table metadata for song or playlist
----@param code string [NOW, NEXT, ADD]
 function M.send_server_queue(result, code)
     if not can_control() then return false end
-    CSTATE.is_paused = false -- queue manipulation = join session if not already
+    CSTATE.is_paused = false
     rednet.send(SERVER_ID, {code, result},  REDIONET_PROTO.SERVER_QUEUE)
     os.queueEvent('redionet:sync_state')
     return true
 end
 
----@param code string [TOGGLE, SKIP, LOOP, VOLUME, SYNC, STATE]
----@param loop_mode? number loop mode [0,1,2] for server playback (only applicable for code=LOOP)
 function M.send_server_player(code, loop_mode)
     if code ~= "STATE" and not can_control() then return false end
     rednet.send(SERVER_ID, {code, loop_mode},  REDIONET_PROTO.SERVER_PLAYER)
@@ -95,9 +94,9 @@ function M.send_server_sync()
 end
 
 function M.toggle_play_local()
-    if CSTATE.is_paused or CSTATE.is_paused == nil then -- first click nil
+    if CSTATE.is_paused or CSTATE.is_paused == nil then
         CSTATE.is_paused = false
-        local status = speaker and 1 or -1 -- speakerless = special case: -1. Syncs but doesn't start receiving
+        local status = speaker and 1 or -1
         rednet.send(SERVER_ID, status, REDIONET_PROTO.AUDIO_CONNECTION)
     else
         CSTATE.is_paused = true
@@ -130,44 +129,69 @@ local function wait_until_play_at(play_at_ms, state)
     end
 end
 
-local function play_audio(buffer, state)
-    if not buffer or CSTATE.is_paused or state.active_stream_id ~= state.song_id then return end
-
-    if not wait_until_play_at(state.play_at_ms, state) then return end
-
-    local volume = CSTATE.server_state.volume or 1.5
-    dbgmon(('- %ds - chunk: %d, song: %s, vol: %0.2f, play_at: %s'):format(
-        state.audio_position_sec, state.chunk_id, state.song_id, volume,
-        state.play_at_ms and tostring(state.play_at_ms) or "now"))
-    os.queueEvent("redionet:audio_timestamp", state.audio_position_sec)
-
-    while not speaker.playAudio(buffer, volume) do
-        local t_full = os.epoch('ingame')
-        dbgmon('SPEAKER FULL')
-        parallel.waitForAny(
-            function()
-                os.pullEvent("speaker_audio_empty")
-                dbgmon(('>>> SPEAKER EMPTY (%sms)'):format((os.epoch('ingame')-t_full)/72))
-            end,
-            function()
-                os.pullEvent("redionet:playback_stopped")
-                state.active_stream_id="HALT"
-            end
-        )
-        if CSTATE.is_paused or state.active_stream_id ~= state.song_id then return end
+local function decode_chunk(encoded)
+    if type(encoded) == "table" then
+        -- backward compat: already decoded by older server builds
+        return encoded
     end
+    return decoder(encoded)
 end
 
-local MAX_CLIENT_QUEUE = 8
+---@return string ack message for server
+local function play_audio(encoded, state)
+    if not encoded or CSTATE.is_paused or state.active_stream_id ~= state.song_id then
+        return "playback_stopped"
+    end
 
-local function process_chunk(item)
-    local buffer, sub_state = table.unpack(item.message)
-    play_audio(buffer, sub_state)
+    if expected_chunk_id == nil then
+        expected_chunk_id = state.chunk_id
+    end
+
+    if state.chunk_id < expected_chunk_id then
+        dbgmon(('DROP stale chunk %d (expected %d)'):format(state.chunk_id, expected_chunk_id))
+        return "chunk_skipped"
+    end
+
+    if state.chunk_id > expected_chunk_id then
+        dbgmon(('GAP flush at chunk %d (expected %d)'):format(state.chunk_id, expected_chunk_id))
+        speaker.stop()
+        expected_chunk_id = state.chunk_id
+    end
+
+    local now_ms = os.epoch("local")
+    if state.stale_after_ms and now_ms > state.stale_after_ms then
+        dbgmon(('SKIP late chunk %d (%dms late)'):format(state.chunk_id, now_ms - state.stale_after_ms))
+        expected_chunk_id = state.chunk_id + 1
+        return "chunk_skipped"
+    end
+
+    if not wait_until_play_at(state.play_at_ms, state) then
+        return "playback_stopped"
+    end
+
+    local volume = CSTATE.server_state.volume or 1.5
+    local buffer = decode_chunk(encoded)
+    dbgmon(('- %ds - chunk: %d, song: %s'):format(state.audio_position_sec, state.chunk_id, state.song_id))
+
+    while not speaker.playAudio(buffer, volume) do
+        parallel.waitForAny(
+            function() os.pullEvent("speaker_audio_empty") end,
+            function()
+                os.pullEvent("redionet:playback_stopped")
+                state.active_stream_id = "HALT"
+            end
+        )
+        if CSTATE.is_paused or state.active_stream_id ~= state.song_id then
+            return "playback_stopped"
+        end
+    end
+
+    expected_chunk_id = state.chunk_id + 1
+    return "request_next_chunk"
 end
 
 
 function M.receive_loop()
-    -- prevent audio loop entry if no speaker attached 
     if not speaker then
         while true do
             local ev, side = os.pullEvent('peripheral')
@@ -179,60 +203,43 @@ function M.receive_loop()
 
     debug_init()
 
-    local chunk_queue = {}
+    local id, message
 
     rednet.send(SERVER_ID, CSTATE.is_paused and 0 or 1, REDIONET_PROTO.AUDIO_CONNECTION)
 
     while true do
         parallel.waitForAny(
             function ()
-                while true do
-                    local id, message = rednet.receive(REDIONET_PROTO.AUDIO)
-                    if CSTATE.is_paused then
-                        rednet.send(id, "playback_stopped", REDIONET_PROTO.AUDIO_NEXT)
-                    else
-                        if #chunk_queue >= MAX_CLIENT_QUEUE then
-                            table.remove(chunk_queue, 1)
-                            dbgmon('CLIENT QUEUE FULL - dropped oldest chunk')
-                        end
-                        table.insert(chunk_queue, {id = id, message = message})
-                        rednet.send(id, "chunk_received", REDIONET_PROTO.AUDIO_NEXT)
-                        os.queueEvent("redionet:audio_chunk_queued")
-                    end
+                id, message = rednet.receive(REDIONET_PROTO.AUDIO)
+
+                if CSTATE.is_paused then
+                    rednet.send(id, "playback_stopped", REDIONET_PROTO.AUDIO_NEXT)
+                else
+                    local encoded, sub_state = table.unpack(message)
+                    local ack = play_audio(encoded, sub_state)
+                    rednet.send(id, (not CSTATE.is_paused) and ack or "playback_stopped", REDIONET_PROTO.AUDIO_NEXT)
                 end
             end,
 
             function ()
-                while true do
-                    os.pullEvent("redionet:audio_chunk_queued")
-                    local item = table.remove(chunk_queue, 1)
-                    if item then
-                        process_chunk(item)
-                    end
-                end
+                id, message = rednet.receive(REDIONET_PROTO.AUDIO_HALT)
+                reset_playback_cursor()
+                speaker.stop()
+                os.queueEvent("redionet:playback_stopped")
+                rednet.send(id, "playback_interrupted", REDIONET_PROTO.AUDIO_NEXT)
             end,
-            
+
             function ()
                 while true do
                     os.pullEvent("redionet:playback_stopped")
-                    chunk_queue = {}
+                    reset_playback_cursor()
                 end
             end,
 
             function ()
                 while true do
-                    local id, message = rednet.receive(REDIONET_PROTO.AUDIO_HALT)
-                    chunk_queue = {}
-                    speaker.stop()
-                    os.queueEvent("redionet:playback_stopped")
-                    rednet.send(id, "playback_interrupted", REDIONET_PROTO.AUDIO_NEXT)
-                end
-            end,
-
-            function ()
-                while true do
-                    local id, message = rednet.receive(REDIONET_PROTO.AUDIO_STATUS)
-                    rednet.send(id, CSTATE.is_paused and 0 or 1, REDIONET_PROTO.AUDIO_CONNECTION)
+                    local sid, _ = rednet.receive(REDIONET_PROTO.AUDIO_STATUS)
+                    rednet.send(sid, CSTATE.is_paused and 0 or 1, REDIONET_PROTO.AUDIO_CONNECTION)
                 end
             end
         )

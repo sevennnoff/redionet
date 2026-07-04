@@ -19,17 +19,16 @@ M.state = {
     num_active = 0,
     n_receivers = 0,
     need_sync = false,
+    speaker_cache = 0.0, -- seconds buffered in client speakers (pacing)
     prefill_end = true,
-    next_play_at_ms = nil, -- shared wall-clock timeline for all clients
+    next_play_at_ms = nil, -- shared wall-clock play timeline
 }
 
-local PREFETCH_CHUNKS = 3 -- chunks sent ahead of the play timeline
-local MAX_PIPELINE_SEC = PREFETCH_CHUNKS * AUDIO_CHUNK_SEC
-local ACK_COLLECT_SEC = 0.10 -- brief receive-ack window; pacing uses play_at, not round-trip
-local PLAY_LEAD_MS = 500 -- min lead before all clients start a chunk
-local SYNC_PLAY_LEAD_MS = 1200 -- prefill window before first play / after hard sync
-local SOFT_REALIGN_DESYNC_MS = 900 -- slip timeline instead of stopping speakers
-local HARD_SYNC_DESYNC_MS = 2200
+local speaker_cache_target = AUDIO_CHUNK_SEC/2
+local first_response_timeout = AUDIO_CHUNK_SEC
+local PLAY_LEAD_MS = 600
+local SYNC_PLAY_LEAD_MS = 1000
+local STALE_PLAY_MS = 350 -- client skips chunk if play_at older than this
 
 local previous = {
     req_chunk_times = {},
@@ -61,7 +60,6 @@ function Buffer.new(handle, song_meta)
     }
     
     self.buffer = {}
-    self.decoder = dfpwm.make_decoder()
     self.audio_total_sec = self.song_meta.duration.H*3600 + self.song_meta.duration.M*60 + self.song_meta.duration.S
     self.audio_total_chunks = math.ceil(self.audio_total_sec / AUDIO_CHUNK_SEC)
     -- for i = 1, self.size, self.chunk_size do
@@ -115,14 +113,8 @@ function Buffer.new(handle, song_meta)
 
         local dsz = #data -- encoded length
 
-        -- table.insert(self.buffer, data)
-        table.insert(self.buffer, self.decoder(data))
-        --[[
-        Preliminary testing shows desynchronization issues worsen when decoding is done
-        by the client. Server decode, cache, transmit seems to be the best approach.
-        For posterity, it's worth noting the main downside is larger rednet transmissions.
-        The decoded message is a table of 131k ints compared to encoded 16k chars. 
-        ]]
+        -- Transmit encoded DFPWM over rednet (~16 KiB) instead of decoded samples (~512 KiB).
+        table.insert(self.buffer, data)
         
         self.total_read.chunks = self.total_read.chunks + 1
         self.total_read.bytes = self.total_read.bytes + dsz
@@ -166,6 +158,10 @@ local function wait_speakers(max_wait, eps)
     os.cancelTimer(timer_max)
 end
 
+local function encoded_chunk_duration_sec(encoded)
+    return (#encoded * 8) / 48000
+end
+
 local function schedule_chunk_play_at(sub_state, audio_dur_sec, sync_point)
     local now_ms = os.epoch("local")
     local lead_ms = sync_point and SYNC_PLAY_LEAD_MS or PLAY_LEAD_MS
@@ -178,49 +174,12 @@ local function schedule_chunk_play_at(sub_state, audio_dur_sec, sync_point)
     end
 
     sub_state.play_at_ms = M.state.next_play_at_ms
+    sub_state.stale_after_ms = M.state.next_play_at_ms + STALE_PLAY_MS
     M.state.next_play_at_ms = M.state.next_play_at_ms + math.floor(audio_dur_sec * 1000)
 end
 
-local function pipeline_ahead_sec()
-    if not M.state.next_play_at_ms then return 0 end
-    return math.max(0, (M.state.next_play_at_ms - os.epoch("local")) / 1000)
-end
 
-local function wait_for_pipeline_room()
-    local ahead = pipeline_ahead_sec()
-    if ahead >= MAX_PIPELINE_SEC then
-        local wait_seconds = round_tick_sec(ahead - MAX_PIPELINE_SEC + 0.05)
-        chat.log_message(('Pipeline full (%0.2fs ahead), waiting %0.2fs'):format(ahead, wait_seconds), "DEBUG")
-        wait_speakers(wait_seconds)
-    end
-end
-
-local function record_chunk_ack(id, msg, istate, play_state, reply, sub_state)
-    if play_state.receiver_stats[id] ~= nil then return end
-
-    if msg == "chunk_received" or msg == "request_next_chunk" then
-        play_state.n_receivers = play_state.n_receivers + 1
-        local timestamp_ms = os.epoch("local")
-        play_state.receiver_stats[id] = 1
-        play_state.num_active = play_state.num_active + 1
-
-        table.insert(reply.ids, id)
-        table.insert(reply.times, timestamp_ms)
-        local play_duration = timestamp_ms - (previous.req_chunk_times[id] or timestamp_ms)
-
-        chat.log_message(string.format('#%d recv (%s, %dms) | n=%d/%d chunk=%d', id,
-            ("%0.3f"):format(timestamp_ms/1000):sub(-8), play_duration,
-            play_state.num_active, play_state.n_receivers, sub_state.chunk_id), "DEBUG")
-
-        previous.req_chunk_times[id] = timestamp_ms
-    elseif msg == "playback_stopped" then
-        play_state.n_receivers = play_state.n_receivers + 1
-        play_state.receiver_stats[id] = -1
-    end
-end
-
-
---  broadcasts the decoded audio buffer data over the audio protocol
+--  broadcasts encoded audio over rednet; clients decode locally
 local function transmit_audio(data_buffer)
      -- NOTE: logging via os.queueEvent("redionet:log_message") saturates event queue, keep sync
     local audio_chunk = data_buffer:next()
@@ -229,7 +188,7 @@ local function transmit_audio(data_buffer)
         return
     end
 
-    local audio_dur_sec = (#audio_chunk/48000)
+    local audio_dur_sec = encoded_chunk_duration_sec(audio_chunk)
 
     local sub_state = {
         active_stream_id = STATE.active_stream_id, -- this is the only place we give clients access to active_stream_id
@@ -269,29 +228,73 @@ local function transmit_audio(data_buffer)
         }
         for id,status in pairs(M.state.receiver_stats) do istate.receiver_stats[id] = status end
 
-        rednet.broadcast({audio_chunk, sub_state}, REDIONET_PROTO.AUDIO)
-        time_audio_sent = os.epoch("local")
+        local timeout = speaker_cache_target
+        local timer, fallback_timer, tid
 
-        local ack_timer = os.startTimer(ACK_COLLECT_SEC)
+        local function all_receivers_replied()
+            for id, _ in pairs(istate.receiver_stats) do
+                if play_state.receiver_stats[id] == nil then
+                    return false
+                end
+            end
+            return true
+        end
+
         parallel.waitForAny(
             function ()
-                while true do
-                    local id, msg = rednet.receive(REDIONET_PROTO.AUDIO_NEXT)
-                    if msg == "playback_interrupted" then break end
-                    record_chunk_ack(id, msg, istate, play_state, reply, sub_state)
-                end
+                rednet.broadcast({audio_chunk, sub_state}, REDIONET_PROTO.AUDIO)
+                time_audio_sent = os.epoch("local")
+                fallback_timer = os.startTimer(first_response_timeout)
+                while true do os.pullEvent() end
             end,
             function ()
-                repeat _, tid = os.pullEvent('timer') until tid == ack_timer
+                repeat
+                    local id,msg = rednet.receive(REDIONET_PROTO.AUDIO_NEXT)
+                    if not timer then
+                        local first_responce_sec = (os.epoch('local') - time_audio_sent )/1000
+                        if fallback_timer then os.cancelTimer(fallback_timer) end
+                        timer = os.startTimer(timeout)
+                        chat.log_message(('First responce: %0.3fs'):format(first_responce_sec), "DEBUG")
+                    end
+
+                    if play_state.receiver_stats[id] ~= nil then
+                        -- duplicate ack
+                    elseif msg == "request_next_chunk" then
+                        play_state.n_receivers = play_state.n_receivers + 1
+                        local timestamp_ms = os.epoch("local")
+                        play_state.receiver_stats[id] = 1
+                        play_state.num_active = play_state.num_active + 1
+                        table.insert(reply.ids, id)
+                        table.insert(reply.times, timestamp_ms)
+                        chat.log_message(string.format('#%d (%s) | n=%d/%d chunk=%d', id,
+                            ("%0.3f"):format(timestamp_ms/1000):sub(-8),
+                            play_state.num_active, play_state.n_receivers, sub_state.chunk_id), "DEBUG")
+                        previous.req_chunk_times[id] = timestamp_ms
+                    elseif msg == "playback_stopped" or msg == "chunk_skipped" then
+                        play_state.n_receivers = play_state.n_receivers + 1
+                        play_state.receiver_stats[id] = -1
+                    elseif msg == "playback_interrupted" then
+                        break
+                    end
+                until all_receivers_replied()
+            end,
+            function ()
+                repeat
+                    _,tid = os.pullEvent('timer')
+                until (timer and tid == timer) or (fallback_timer and tid == fallback_timer)
+                for id, status in pairs(istate.receiver_stats) do
+                    if not play_state.receiver_stats[id] then
+                        M.state.receiver_stats[id] = nil
+                        M.state.n_receivers = M.state.n_receivers - 1
+                        M.state.num_active = M.state.num_active - (status == 1 and 1 or 0)
+                        chat.log_message(('Client #%d timed out'):format(id), 'WARN')
+                    end
+                end
             end
         )
-        os.cancelTimer(ack_timer)
 
-        for id, status in pairs(istate.receiver_stats) do
-            if not play_state.receiver_stats[id] then
-                chat.log_message(('Client #%d missed chunk #%d'):format(id, sub_state.chunk_id), 'WARN')
-            end
-        end
+        if timer then os.cancelTimer(timer) end
+        if fallback_timer then os.cancelTimer(fallback_timer) end
     end
 
     -- print(textutils.serialize(M.state, {compact = true, allow_repetitions = true}))
@@ -317,49 +320,43 @@ local function transmit_audio(data_buffer)
 
     -- AUDIO_HALT makes all clients not request_next_chunk, thus #rep_ids=0. Only warn if server has active song. 
     if #reply.ids == 0 and STATE.active_stream_id ~= nil then
-        chat.log_message('No chunk_received acks this cycle', 'WARN')
+        chat.log_message('No remaining listeners... Stopping', 'WARN')
+        return M.stop_song()
     end
 
     if #reply.times > 1 then
-        local desync_ms = (math.max(table.unpack(reply.times)) - math.min(table.unpack(reply.times)))--/Gms
+        local desync_ms = (math.max(table.unpack(reply.times)) - math.min(table.unpack(reply.times)))
         chat.log_message(string.format('max client desync: %dms | n=%d/%d', desync_ms, #reply.times, play_state.n_receivers), "INFO")
-
-        if desync_ms > SOFT_REALIGN_DESYNC_MS then
-            local id_order, delay = {'ID:'}, {'LAG'}
-            for i,id in ipairs(reply.ids) do
-                id_order[i+1] = ("%d"):format(id)
-                delay[i+1] = ("%dms"):format(((i < #reply.times and reply.times[i+1] - reply.times[i]) or 0))
-            end
-
-            if desync_ms >= HARD_SYNC_DESYNC_MS then
-                chat.log_message('Detected client desync. Hard sync..', "WARN")
-                textutils.tabulate(colors.white, id_order, colors.pink, delay)
-                os.queueEvent('redionet:sync')
-                M.state.next_play_at_ms = nil
-            else
-                chat.log_message(('Detected client desync (%dms). Realigning timeline..'):format(desync_ms), "WARN")
-                M.state.next_play_at_ms = os.epoch("local") + SYNC_PLAY_LEAD_MS
-            end
+        if desync_ms > 1000 then
+            chat.log_message('Detected client desync. Forcing sync..', "WARN")
+            os.queueEvent('redionet:sync')
+            M.state.next_play_at_ms = nil
+            M.state.speaker_cache = 0
         end
     end
 
-
     if previous.time_audio_sent then
         local send_elapsed = (time_audio_sent - previous.time_audio_sent)
-        chat.log_message(('Send elapsed: %0.3fs, Pipeline: %0.2fs ahead'):format(
-            send_elapsed/1000, pipeline_ahead_sec()), "DEBUG")
+        chat.log_message(('Send elapsed: %0.3fs, SpkCache: %0.3fs'):format(send_elapsed/1000, M.state.speaker_cache), "DEBUG")
     end
 
     previous.time_audio_sent = time_audio_sent
 
-    wait_for_pipeline_room()
+    local elapsed_sec = (os.epoch('local') - time_audio_sent)/1000
+    local free_sec = audio_dur_sec - elapsed_sec
+    M.state.speaker_cache = M.state.speaker_cache + free_sec
+    local wait_seconds = round_tick_sec(M.state.speaker_cache - speaker_cache_target - 0.005)
 
-    parallel.waitForAny(
-        function () if not M.state.prefill_end then data_buffer:read_n(2) end end,
-        function () if M.state.prefill_end and pipeline_ahead_sec() > 1.0 then data_buffer:read_n(2) end end
+    chat.log_message(('elap: %0.3fs, free: %0.3fs, audio: %0.3fs, wait: %0.3fs'):format(
+        elapsed_sec, free_sec, audio_dur_sec, wait_seconds), "DEBUG")
+
+    parallel.waitForAll(
+        function () wait_speakers(wait_seconds) end,
+        function () if M.state.prefill_end and wait_seconds > 1.000 then data_buffer:read_n(2) end end
     )
 
-    M.state.prefill_end = pipeline_ahead_sec() > 0.5
+    M.state.speaker_cache = M.state.speaker_cache - wait_seconds
+    M.state.prefill_end = wait_seconds > elapsed_sec
 
     if ok then
         os.queueEvent("redionet:request_next_chunk")
@@ -370,7 +367,8 @@ end
 
 ---@param data_buffer Buffer holds data
 local function process_audio_data(data_buffer)
-    M.state.need_sync = true -- always sync on new song
+    M.state.speaker_cache = 0
+    M.state.need_sync = true
     M.state.prefill_end = true
     M.state.next_play_at_ms = nil
 

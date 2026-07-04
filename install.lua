@@ -13,7 +13,7 @@ local prog_args = { ... }
 
 
 local BASE_URL = "https://raw.githubusercontent.com/sevennnoff/redionet/refs/heads/main/"
-local INSTALL_VERSION = "2026-07-04-pipeline-prefetch"
+local INSTALL_VERSION = "2026-07-04-barrier-encoded"
 
 local filemap = {}
 
