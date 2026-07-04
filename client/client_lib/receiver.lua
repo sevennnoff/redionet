@@ -158,15 +158,11 @@ local function play_audio(buffer, state)
     end
 end
 
-local function process_chunk(id, message)
-    if CSTATE.is_paused then
-        rednet.send(id, "playback_stopped", REDIONET_PROTO.AUDIO_NEXT)
-        return
-    end
+local MAX_CLIENT_QUEUE = 8
 
-    local buffer, sub_state = table.unpack(message)
+local function process_chunk(item)
+    local buffer, sub_state = table.unpack(item.message)
     play_audio(buffer, sub_state)
-    rednet.send(id, (not CSTATE.is_paused) and "request_next_chunk" or "playback_stopped", REDIONET_PROTO.AUDIO_NEXT)
 end
 
 
@@ -192,8 +188,17 @@ function M.receive_loop()
             function ()
                 while true do
                     local id, message = rednet.receive(REDIONET_PROTO.AUDIO)
-                    table.insert(chunk_queue, {id = id, message = message})
-                    os.queueEvent("redionet:audio_chunk_queued")
+                    if CSTATE.is_paused then
+                        rednet.send(id, "playback_stopped", REDIONET_PROTO.AUDIO_NEXT)
+                    else
+                        if #chunk_queue >= MAX_CLIENT_QUEUE then
+                            table.remove(chunk_queue, 1)
+                            dbgmon('CLIENT QUEUE FULL - dropped oldest chunk')
+                        end
+                        table.insert(chunk_queue, {id = id, message = message})
+                        rednet.send(id, "chunk_received", REDIONET_PROTO.AUDIO_NEXT)
+                        os.queueEvent("redionet:audio_chunk_queued")
+                    end
                 end
             end,
 
@@ -202,7 +207,7 @@ function M.receive_loop()
                     os.pullEvent("redionet:audio_chunk_queued")
                     local item = table.remove(chunk_queue, 1)
                     if item then
-                        process_chunk(item.id, item.message)
+                        process_chunk(item)
                     end
                 end
             end,
@@ -226,7 +231,7 @@ function M.receive_loop()
 
             function ()
                 while true do
-                    id, message = rednet.receive(REDIONET_PROTO.AUDIO_STATUS)
+                    local id, message = rednet.receive(REDIONET_PROTO.AUDIO_STATUS)
                     rednet.send(id, CSTATE.is_paused and 0 or 1, REDIONET_PROTO.AUDIO_CONNECTION)
                 end
             end

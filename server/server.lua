@@ -254,7 +254,6 @@ local function server_loop()
                         os.queueEvent('redionet:broadcast_state', "SERVER_PLAYER: VOLUME")
                     elseif code == "SYNC" then
                         audio.state.need_sync = true
-                        audio.state.speaker_cache = 0
                         audio.state.next_play_at_ms = nil
                         os.queueEvent('redionet:sync')
                         os.queueEvent('redionet:broadcast_state', "SERVER_PLAYER: SYNC")
@@ -298,7 +297,6 @@ local function server_event_loop()
                     chat.show_help()
                 elseif cmd == 'sync' then
                     audio.state.need_sync = true
-                    audio.state.speaker_cache = 0
                     audio.state.next_play_at_ms = nil
                     os.queueEvent('redionet:sync')
                 elseif cmd == 'killlegacy' then
@@ -311,7 +309,6 @@ local function server_event_loop()
 
             function()
                 os.pullEvent('redionet:sync') -- Queued by command `rn sync`
-                audio.state.speaker_cache = 0 -- stopping speakers wipes any buffered audio
                 rednet.broadcast('sync', REDIONET_PROTO.CLIENT_SYNC)
             end,
 
