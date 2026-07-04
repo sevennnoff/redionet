@@ -72,7 +72,7 @@ Non-user Settings (auto-assigned during installation) - `redionet.device_type` a
 
 ### Control Password
 
-On first server start, Redionet creates `.redionet.auth` and prints a generated control password in the server terminal. Server playback, queue, loop mode, and volume controls only work from the Controller that entered this password. The password is stored encrypted on the server; delete `.redionet.auth` and restart the server to generate a new one.
+During Server installation, Redionet asks for a control password and stores it encrypted in `.redionet.auth`. Server playback, queue, loop mode, and volume controls only work from the Controller that entered this password. Re-run the installer as Server or delete `.redionet.auth` and restart the server to set a new one.
 
 Volume is server-wide. Changing it on the authorized Controller updates all connected Clients.
 

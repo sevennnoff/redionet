@@ -44,4 +44,5 @@ luac.out
 
 .ref-files
 config
+.redionet.*
 **/*.log

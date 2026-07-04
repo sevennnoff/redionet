@@ -273,6 +273,11 @@ local function http_get(url)
 end
 
 local function write_file(response_body, resolved_path)
+    local parent = fs.getDir(resolved_path)
+    if parent and #parent > 0 and not fs.exists(parent) then
+        fs.makeDir(parent)
+    end
+
     local file, file_open_error_message = fs.open(resolved_path, "wb")
     if not file then
         error(('Failed to save "%s" (%s).'):format(resolved_path, file_open_error_message or "Unknown error"), 0)
@@ -280,6 +285,118 @@ local function write_file(response_body, resolved_path)
 
     file.write(response_body)
     file.close()
+end
+
+local function all_install_paths()
+    local paths = {
+        "./startup/init.lua",
+        "./.redionet.state",
+        "./.redionet.auth",
+        "./.logs/server.log",
+    }
+    local seen = {}
+
+    for _, path in ipairs(paths) do seen[path] = true end
+
+    for _, files in pairs(filemap) do
+        for path in pairs(files) do
+            if not seen[path] then
+                table.insert(paths, path)
+                seen[path] = true
+            end
+        end
+    end
+
+    return paths
+end
+
+local function clean_previous_install()
+    term.setTextColor(colors.yellow)
+    print("Cleaning previous Redionet files..")
+
+    for _, path in ipairs(all_install_paths()) do
+        local resolved_path = shell.resolve(path)
+        if fs.exists(resolved_path) then
+            fs.delete(resolved_path)
+            writeColoured(('Deleted "%s"\n'):format(path), colors.lightGray)
+        end
+    end
+end
+
+local function to_hex(data)
+    return (data:gsub(".", function(c) return ("%02x"):format(string.byte(c)) end))
+end
+
+local function bxor(a, b)
+    if bit32 and bit32.bxor then return bit32.bxor(a, b) end
+
+    local result = 0
+    local bit = 1
+    while a > 0 or b > 0 do
+        local abit = a % 2
+        local bbit = b % 2
+        if abit ~= bbit then result = result + bit end
+        a = math.floor(a / 2)
+        b = math.floor(b / 2)
+        bit = bit * 2
+    end
+    return result
+end
+
+local function xor_crypt(data, key)
+    local out = {}
+    for i = 1, #data do
+        local kb = string.byte(key, ((i - 1) % #key) + 1)
+        out[i] = string.char(bxor(string.byte(data, i), kb))
+    end
+    return table.concat(out)
+end
+
+local function random_key(length)
+    local out = {}
+    math.randomseed(os.epoch("local") + os.getComputerID())
+    for i = 1, length do
+        out[i] = string.char(math.random(33, 126))
+    end
+    return table.concat(out)
+end
+
+local function write_auth_file(password)
+    local key = random_key(32)
+    local resolved_path = shell.resolve("./.redionet.auth")
+    write_file(textutils.serialize({
+        key = to_hex(key),
+        password = to_hex(xor_crypt(password, key)),
+    }), resolved_path)
+end
+
+local function setup_server_password()
+    while true do
+        term.setTextColor(colors.cyan)
+        write("Control password: ")
+        term.setTextColor(colors.white)
+        local password = read("*")
+
+        if not password or #password == 0 then
+            term.setTextColor(colors.red)
+            print("Password cannot be empty.")
+        else
+            term.setTextColor(colors.cyan)
+            write("Confirm password: ")
+            term.setTextColor(colors.white)
+            local confirm = read("*")
+
+            if password == confirm then
+                write_auth_file(password)
+                term.setTextColor(colors.lime)
+                print("Control password saved.")
+                return
+            end
+
+            term.setTextColor(colors.red)
+            print("Passwords do not match.")
+        end
+    end
 end
 
 
@@ -331,6 +448,8 @@ local function fresh_install()
 
     local device_type = choose_device_type()
     settings.set('redionet.device_type', device_type)
+
+    clean_previous_install()
     
     local files = filemap[device_type]
     
@@ -344,22 +463,16 @@ local function fresh_install()
 
     for path, download_url in pairs(files) do
         local resolved_path = shell.resolve(path)
-        local can_write = true
-        
-        if fs.exists(resolved_path) then
-            term.setTextColour(colors.yellow)
-            print(("'%s' already exists."):format(path))
-            can_write = tf_question(('\187 Overwrite?'):format(path))
-        end
-        
-        if can_write then
-            local response_body = http_get(download_url)
+        local response_body = http_get(download_url)
 
-            write_file(response_body, resolved_path)
+        write_file(response_body, resolved_path)
 
-            term.setTextColour(colors.lime)
-            print(('Downloaded "%s"'):format(path))
-        end
+        term.setTextColour(colors.lime)
+        print(('Downloaded "%s"'):format(path))
+    end
+
+    if device_type == "server" then
+        setup_server_password()
     end
 
     term.setTextColor(colors.white)
@@ -405,16 +518,23 @@ local function update(device_type)
         end
     end
 
+    if device_type == "server" then
+        setup_server_password()
+        files_updated = true
+    end
+
     return files_updated
 end
 
 local function parse_cli_flags()
     local flags = {
         force = false,
+        update = false,
         verbose = false,
     }
     for _, value in pairs(prog_args) do
         if value == "-f" or value == "--force-reinstall" then flags.force = true
+        elseif value == "--update" then flags.update = true
         elseif value == "-v" or value == "--verbose" then flags.verbose = true
         end
     end
@@ -428,10 +548,10 @@ local function main()
     local device_type = settings.get('redionet.device_type')
 
     local file_changes = true
-    if flags.force or not device_type then
-        fresh_install()
-    else
+    if flags.update and device_type and not flags.force then
         file_changes = update(device_type)
+    else
+        fresh_install()
     end
 
     os.queueEvent('redionet:update_complete', file_changes)
