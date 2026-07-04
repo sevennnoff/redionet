@@ -21,19 +21,21 @@ pastebin run TH0EPrX0
 
 Option 2: `wget` 
 ```sh
-wget run https://raw.githubusercontent.com/Rypo/redionet/refs/heads/main/install.lua
+wget run https://raw.githubusercontent.com/sevennnoff/redionet/refs/heads/main/install.lua
 ```
 
 ## Setup
 
-You'll need exactly 1 Server computer and as many Client computers as you'd like, but at least one to get started. 
+You'll need exactly 1 Server computer, as many passive Client computers as you'd like, and one optional Controller computer for remote control.
 
-Computers are designated as either the Server or a Client upon running the Installation script.
+Computers are designated as Server, Client, or Controller upon running the Installation script.
 
 ### Minimum
 **Server** - Advanced Computer/Turtle with Ender modem
 
-**Client(s)** - Advanced Computer/Turtle with Ender modem + Speaker 
+**Client(s)** - Advanced Computer/Turtle with Ender modem + Speaker
+
+**Controller** - Advanced Computer/Pocket Computer with Ender modem. Speaker not required.
 
 ### Preferred
 _[Advanced Peripherals](https://docs.advanced-peripherals.de/latest/) (AP) mod required for some peripherals._
@@ -51,13 +53,15 @@ Client chunks do not all _need_ to be force loaded, however, frequently cycling 
 
 **Clients**: no additional peripheral recommendations
 
+**Controller**: no additional peripheral recommendations
+
 
 ### Additional (Optional)
 
-**Pocket Client**: Advanced Pocket Computer with Ender modem
-- Allows you to add songs on the go!
+**Pocket Controller**: Advanced Pocket Computer with Ender modem
+- Allows you to control playback and add songs on the go.
   
-At the moment, Pockets are limited to queue management (i.e., no audio) in the majority of cases. Certain alpha [CC:T+MC versions](https://github.com/cc-tweaked/CC-Tweaked/commit/0a0c80d) allow 2 peripheral attachments on pocket devices. These versions may support Pocket audio clients, but this has not been tested. 
+At the moment, passive audio Clients still need a speaker. Pocket computers are best used as Controllers unless your CC:T version supports enough attached peripherals for modem + speaker audio.
 
 ### Settings
 
@@ -65,6 +69,12 @@ At the moment, Pockets are limited to queue management (i.e., no audio) in the m
 1=DEBUG, 2=INFO, 3=WARN, 4=ERROR (default=3).
 
 Non-user Settings (auto-assigned during installation) - `redionet.device_type` and `redionet.run_on_boot`. Do not manually change these - use the install script instead.
+
+### Control Password
+
+On first server start, Redionet creates `.redionet.auth` and prints a generated control password in the server terminal. Server playback, queue, loop mode, and volume controls only work from the Controller that entered this password. The password is stored encrypted on the server; delete `.redionet.auth` and restart the server to generate a new one.
+
+Volume is server-wide. Changing it on the authorized Controller updates all connected Clients.
 
 ## Chat Commands
 - `rn help`   - Prints each chat command with a brief description in the server terminal.  
@@ -76,12 +86,12 @@ Non-user Settings (auto-assigned during installation) - `redionet.device_type` a
 ### Command Usage
 
 **With AP mod** and a Chat Box peripheral attached,
-- Simply type the command in chat to use it. You'll see a chat confirmation (unless sent silently, e.g., `$rn sync`) and it will execute.
+- Song announcements still use chat. Chat commands are not accepted from regular player chat because control is limited to the authorized Controller.
 
 **Without AP mod**, there are two alternative ways to use commands.
 1. If you're next to the server computer, type the command into the server's built-in `CMD>` line.
    
-2. Get a wireless pocket computer, open the `lua` repl, and send the command over the `PROTO_CHATBOX` rednet protocol, e.g.
+2. From the currently authorized Controller computer, open the `lua` repl, and send the command over the `PROTO_CHATBOX` rednet protocol, e.g.
     ```lua
     peripheral.find("modem", rednet.open)
     rednet.broadcast("rn update", "PROTO_CHATBOX")

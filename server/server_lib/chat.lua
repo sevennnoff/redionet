@@ -22,6 +22,9 @@ M.commands_list = {'help', 'reboot', 'reload', 'update', 'sync', }
 M.command_valid = {} -- Set
 for _,v in ipairs(M.commands_list) do M.command_valid[v] = true end
 
+M.authorize_rednet_chatbox = function() return true end
+M.authorize_chat_command = function() return true end
+
 local command_help = {
     ['help']   = "Display this help message.",
     ['reboot'] = "Reboot server+clients, may not auto resume.",
@@ -50,7 +53,7 @@ function M.writeto(text, dst_term)
 end
 
 function M.show_help()
-    local repo_url = "github.com/Rypo/redionet"
+    local repo_url = "github.com/sevennnoff/redionet"
     local orig_color = term_window.getTextColor()
 
     -- display help in server terminal, even if monitor attached
@@ -296,6 +299,10 @@ function M.chat_loop()
             function ()
                 -- access chatBox specific behavior without Advanced Peripherals mod
                 local id, message = rednet.receive('PROTO_CHATBOX')
+                if not M.authorize_rednet_chatbox(id) then
+                    M.log_message(("Rejected chat command bridge from unauthorized client #%d"):format(id), "WARN")
+                    return
+                end
                 local user, uuid = ('computer_#%d'):format(id), ('%08d-%04d-%04d-%04d-%012d'):format(0,0,0,0,id)
                 local ishidden = (message:sub(1,1) == "$")
                 if ishidden then message = message:sub(2) end
@@ -307,6 +314,11 @@ function M.chat_loop()
                 local ev, user, message, uuid, ishidden = os.pullEvent("chat")
                 message = string.lower(message)
                 local cmd = message:match("rn (%l+)") -- match format: "rn lowercaseletters"
+
+                if cmd and not M.authorize_chat_command(user) then
+                    M.log_message(("Rejected chat command from unauthorized user %s"):format(user), "WARN")
+                    return
+                end
 
                 -- probably too rigid long term, but fine for now while few commands
                 if M.command_valid[cmd] then

@@ -86,10 +86,12 @@ end
 M.state = {}
 M.state.active_tab = 1
 M.state.waiting_for_input = false
+M.state.input_mode = nil -- search|auth
+M.state.pending_auth_action = nil
 M.state.in_search_result_view = false
 M.state.clicked_result_index = nil
 M.state.loop_mode = 0 -- Local only
-M.state.ui_enabled = true -- alias for (not CSTATE.is_paused) currently
+M.state.ui_enabled = false -- server control enabled after password auth
 
 M.state.now_playing_seconds = 0
 M.state.now_playing_artist_line = nil
@@ -212,8 +214,10 @@ local function draw_now_playing_tab()
         
         term.setCursorPos(config.ui.xpos, 4)
 
-        term.write("Client: ")
-        if CSTATE.is_paused then
+        term.write(CSTATE.is_controller and "Controller: " or "Client: ")
+        if CSTATE.is_controller then
+            term.write("ready")
+        elseif CSTATE.is_paused then
             term.write("paused")
         else
             term.write("ready")
@@ -233,18 +237,23 @@ local function draw_now_playing_tab()
         term.setTextColor(config.colors.error_text)
         term.setCursorPos(config.ui.xpos, 5)
         term.write("Network error: " .. error_status)
+    elseif not CSTATE.is_authorized then
+        term.setTextColor(config.colors.text_tertiary)
+        term.setCursorPos(config.ui.xpos, 5)
+        term.write("Locked: enter password to control")
     end
 
 
     -- Buttons
     local btn_cfg
     
-    -- Play/Stop
-    btn_cfg = config.ui.play_button
-    set_colors(config.colors.text, config.colors.btn_bg) -- reset after box draw
-    term.setCursorPos(btn_cfg.x, btn_cfg.y)
-
-    term.write((CSTATE.is_paused == false) and btn_cfg.label_stop or btn_cfg.label_play)
+    -- Local Play/Stop
+    if not CSTATE.is_controller then
+        btn_cfg = config.ui.play_button
+        set_colors(config.colors.text, config.colors.btn_bg) -- reset after box draw
+        term.setCursorPos(btn_cfg.x, btn_cfg.y)
+        term.write((CSTATE.is_paused == false) and btn_cfg.label_stop or btn_cfg.label_play)
+    end
 
     -- Skip
     local skip_enabled = CSTATE.server_state.status > -1 -- skip button active also depends on if there is a song to skip
@@ -271,11 +280,12 @@ local function draw_now_playing_tab()
     -- Volume slider
     local vol_cfg = config.ui.volume_slider
     paintutils.drawBox(vol_cfg.x, vol_cfg.y, vol_cfg.x + vol_cfg.width - 1, vol_cfg.y, config.colors.volume_slider)
-    local handle_width = math.floor((vol_cfg.width - 1) * (CSTATE.volume / 3) + 0.5)
+    local volume = CSTATE.server_state.volume or 1.5
+    local handle_width = math.floor((vol_cfg.width - 1) * (volume / 3) + 0.5)
     if handle_width > 0 then
         paintutils.drawBox(vol_cfg.x, vol_cfg.y, vol_cfg.x + handle_width - 0, vol_cfg.y, config.colors.volume_slider_active)
     end
-    local percent_str = math.floor(100 * (CSTATE.volume / 3) + 0.5) .. "%"
+    local percent_str = math.floor(100 * (volume / 3) + 0.5) .. "%"
     if handle_width > #percent_str + 2 then
         set_colors(config.colors.text_active, config.colors.volume_slider_active)
         term.setCursorPos(vol_cfg.x + handle_width - #percent_str - 1, vol_cfg.y)
@@ -454,7 +464,7 @@ end
 function M.redraw_screen()
     if M.state.waiting_for_input then return end
 
-    M.state.ui_enabled = (not CSTATE.is_paused)
+    M.state.ui_enabled = CSTATE.is_authorized
 
     term.setCursorBlink(false)
     term.setBackgroundColor(config.colors.bg)
@@ -469,6 +479,44 @@ function M.redraw_screen()
     elseif M.state.active_tab == 2 then
         draw_search_tab()
     end
+end
+
+local function request_auth(action)
+    if CSTATE.is_authorized then
+        if action then action() end
+        return true
+    end
+
+    M.state.pending_auth_action = action
+    M.state.input_mode = "auth"
+    M.state.waiting_for_input = true
+    return false
+end
+
+local function handle_auth_input()
+    term.setBackgroundColor(config.colors.bg)
+    term.setTextColor(config.colors.text)
+    term.setCursorPos(config.ui.xpos, 5)
+    term.clearLine()
+    term.write("Password: ")
+    term.setCursorBlink(true)
+
+    local password = read("*")
+    term.setCursorBlink(false)
+
+    local ok = false
+    if password and #password > 0 then
+        ok = receiver.authenticate(password)
+    end
+
+    if ok and M.state.pending_auth_action then
+        M.state.pending_auth_action()
+    end
+
+    M.state.pending_auth_action = nil
+    M.state.input_mode = nil
+    M.state.waiting_for_input = false
+    M.redraw_screen()
 end
 
 local function handle_search_input()
@@ -492,6 +540,7 @@ local function handle_search_input()
     end
 
     M.state.waiting_for_input = false
+    M.state.input_mode = nil
     M.redraw_screen()
 end
 
@@ -547,7 +596,7 @@ local function handle_click(button, x, y)
         M.redraw_screen()
 
         if code then
-            receiver.send_server_queue(result, code)
+            request_auth(function() receiver.send_server_queue(result, code) end)
         end
         
         return
@@ -562,6 +611,8 @@ local function handle_click(button, x, y)
         else -- click global server play status tab
             if CSTATE.server_state.status ~= -1 and M.state.ui_enabled then
                 receiver.send_server_player("TOGGLE") -- global play/pause
+            elseif CSTATE.server_state.status ~= -1 then
+                request_auth(function() receiver.send_server_player("TOGGLE") end)
             end
         end
         M.redraw_screen()
@@ -570,7 +621,7 @@ local function handle_click(button, x, y)
 
     if M.state.active_tab == 1 then -- Now Playing Tab
         if y == config.ui.play_button.y then
-            if is_in_box(x, y, config.ui.play_button) then
+            if not CSTATE.is_controller and is_in_box(x, y, config.ui.play_button) then
                 receiver.toggle_play_local() -- local play/pause
 
             elseif M.state.ui_enabled then
@@ -583,10 +634,19 @@ local function handle_click(button, x, y)
                     M.state.loop_mode = (M.state.loop_mode + 1) % 3
                     receiver.send_server_player("LOOP", M.state.loop_mode)
                 end
+            elseif is_in_box(x, y, config.ui.skip_button) and CSTATE.server_state.status > -1 then
+                request_auth(function() receiver.send_server_player("SKIP") end)
+            elseif is_in_box(x, y, config.ui.loop_button) then
+                local next_loop_mode = (M.state.loop_mode + 1) % 3
+                request_auth(function()
+                    M.state.loop_mode = next_loop_mode
+                    receiver.send_server_player("LOOP", M.state.loop_mode)
+                end)
             end
-        elseif y == config.ui.volume_slider.y then -- volume slider always active since no effect on other clients 
+        elseif y == config.ui.volume_slider.y then
             if is_in_box(x, y, config.ui.volume_slider) then
-                CSTATE.volume = (x - config.ui.volume_slider.x) / (config.ui.volume_slider.width - 1) * 3
+                local volume = (x - config.ui.volume_slider.x) / (config.ui.volume_slider.width - 1) * 3
+                request_auth(function() receiver.send_server_volume(volume) end)
             end
         end
         
@@ -594,6 +654,7 @@ local function handle_click(button, x, y)
         
     elseif M.state.active_tab == 2 then -- Search Tab
         if is_in_box(x, y, config.ui.search_bar) then
+            M.state.input_mode = "search"
             M.state.waiting_for_input = true
             return
         end
@@ -619,7 +680,9 @@ end
 local function handle_drag(button, x, y)
     if button > 1 then return end
     if M.state.active_tab == 1 and y == config.ui.volume_slider.y and is_in_box(x, y, config.ui.volume_slider) then
-        CSTATE.volume = (x - config.ui.volume_slider.x) / (config.ui.volume_slider.width - 1) * 3
+        if not CSTATE.is_authorized then return end
+        local volume = (x - config.ui.volume_slider.x) / (config.ui.volume_slider.width - 1) * 3
+        receiver.send_server_volume(volume)
         M.redraw_screen()
     end
 end
@@ -638,6 +701,7 @@ local function handle_key_press(key, is_held)
             M.redraw_screen()
         
         elseif key_name == "enter" and M.state.hl_idx == nil and not M.state.in_search_result_view then -- enter into search_bar by pressing enter provided nothing is selected
+            M.state.input_mode = "search"
             M.state.waiting_for_input = true
             return
 
@@ -692,10 +756,11 @@ end
 
 
 local function handle_click_out()
-    while M.state.waiting_for_input do
+    while M.state.waiting_for_input and M.state.input_mode == "search" do
         local event, button, x, y = os.pullEvent("mouse_click")
         if not is_in_box(x, y, config.ui.search_bar) then
             M.state.waiting_for_input = false
+            M.state.input_mode = nil
             handle_click(button, x, y)
         end
     end
@@ -706,7 +771,11 @@ function M.ui_loop()
     M.redraw_screen()
     while true do
         if M.state.waiting_for_input then
-            parallel.waitForAny(handle_search_input, handle_click_out)
+            if M.state.input_mode == "auth" then
+                handle_auth_input()
+            else
+                parallel.waitForAny(handle_search_input, handle_click_out)
+            end
         else
             parallel.waitForAny(
                 function ()

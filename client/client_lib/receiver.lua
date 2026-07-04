@@ -44,26 +44,49 @@ function M.update_server_state(blocking)
         rednet.send(SERVER_ID, {"STATE", nil}, "PROTO_SERVER_PLAYER")
         local id, server_state = rednet.receive('PROTO_SERVER_STATE')
         CSTATE.server_state = server_state
+        CSTATE.is_authorized = server_state.controller_id == CLIENT_ID
 
     else
         os.queueEvent('redionet:sync_state')
     end
 end
 
+function M.authenticate(password)
+    rednet.send(SERVER_ID, {"AUTH", password}, "PROTO_SERVER")
+    local id, payload = rednet.receive('PROTO_SERVER:REPLY', 2.0)
+    local code, ok
+    if type(payload) == "table" then code, ok = table.unpack(payload) end
+
+    CSTATE.is_authorized = (code == "AUTH" and ok == true)
+    os.queueEvent('redionet:sync_state')
+    return CSTATE.is_authorized
+end
+
+local function can_control()
+    return CSTATE.is_authorized
+end
 
 ---@param result table metadata for song or playlist
 ---@param code string [NOW, NEXT, ADD]
 function M.send_server_queue(result, code)
+    if not can_control() then return false end
     CSTATE.is_paused = false -- queue manipulation = join session if not already
     rednet.send(SERVER_ID, {code, result},  "PROTO_SERVER_QUEUE")
     os.queueEvent('redionet:sync_state')
+    return true
 end
 
----@param code string [TOGGLE, SKIP, LOOP, STATE]
+---@param code string [TOGGLE, SKIP, LOOP, VOLUME, STATE]
 ---@param loop_mode? number loop mode [0,1,2] for server playback (only applicable for code=LOOP)
 function M.send_server_player(code, loop_mode)
+    if code ~= "STATE" and not can_control() then return false end
     rednet.send(SERVER_ID, {code, loop_mode},  "PROTO_SERVER_PLAYER")
     os.queueEvent('redionet:sync_state')
+    return true
+end
+
+function M.send_server_volume(volume)
+    return M.send_server_player("VOLUME", volume)
 end
 
 function M.toggle_play_local()
@@ -84,10 +107,11 @@ end
 local function play_audio(buffer, state)
     if not buffer or CSTATE.is_paused or state.active_stream_id ~= state.song_id then return end
 
-    dbgmon(('- %ds - chunk: %d, song: %s, vol: %0.2f'):format(state.audio_position_sec, state.chunk_id, state.song_id, CSTATE.volume))
+    local volume = CSTATE.server_state.volume or 1.5
+    dbgmon(('- %ds - chunk: %d, song: %s, vol: %0.2f'):format(state.audio_position_sec, state.chunk_id, state.song_id, volume))
     os.queueEvent("redionet:audio_timestamp", state.audio_position_sec)
 
-    while not speaker.playAudio(buffer, CSTATE.volume) do
+    while not speaker.playAudio(buffer, volume) do
         -- local t_full = os.epoch('local')
         local t_full = os.epoch('ingame')
         dbgmon('SPEAKER FULL')

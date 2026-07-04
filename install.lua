@@ -3,7 +3,7 @@ _ _  _ ____ ___ ____ _    _    ____ ____
 | |\ | [__   |  |__| |    |    |___ |__/
 | | \| ___]  |  |  | |___ |___ |___ |  \
 
-Github Repository: https://github.com/Rypo/redionet
+Github Repository: https://github.com/sevennnoff/redionet
 
 ]]
 -- Install script based on: https://github.com/CC-YouCube/installer/blob/main/src/installer.lua
@@ -12,13 +12,14 @@ Github Repository: https://github.com/Rypo/redionet
 local prog_args = { ... }
 
 
-local BASE_URL = "https://raw.githubusercontent.com/Rypo/redionet/refs/heads/main/"
+local BASE_URL = "https://raw.githubusercontent.com/sevennnoff/redionet/refs/heads/main/"
 
 local filemap = {}
 
 filemap["server"] = {
     ["./server.lua"] = BASE_URL ..              "server/server.lua",
     ["./server_lib/audio.lua"] = BASE_URL ..    "server/server_lib/audio.lua",
+    ["./server_lib/auth.lua"] = BASE_URL ..     "server/server_lib/auth.lua",
     ["./server_lib/chat.lua"] = BASE_URL ..     "server/server_lib/chat.lua",
     ["./server_lib/network.lua"] = BASE_URL ..  "server/server_lib/network.lua",
 }
@@ -30,9 +31,16 @@ filemap["client"] = {
     ["./client_lib/ui.lua"] = BASE_URL ..       "client/client_lib/ui.lua",
 }
 
+filemap["controller"] = {
+    ["./client.lua"] = BASE_URL ..              "client/client.lua",
+    ["./client_lib/net.lua"] = BASE_URL ..      "client/client_lib/net.lua",
+    ["./client_lib/receiver.lua"] = BASE_URL .. "client/client_lib/receiver.lua",
+    ["./client_lib/ui.lua"] = BASE_URL ..       "client/client_lib/ui.lua",
+}
+
 local function load_settings(verbose)
     settings.define("redionet.device_type", {
-        description = "Designation for this computer. 'client' or 'server'",
+        description = "Designation for this computer. 'client', 'controller', or 'server'",
         type = "string",
     })
     settings.define("redionet.run_on_boot", {
@@ -91,6 +99,29 @@ local function writeColoured(text, colour)
     write(text)
 end
 
+local function write_wrapped(text, x, width)
+    x = x or 1
+    width = width or select(1, term.getSize()) - x + 1
+    local line = ""
+
+    for word in tostring(text):gmatch("%S+") do
+        if #line == 0 then
+            line = word
+        elseif #line + #word + 1 <= width then
+            line = line .. " " .. word
+        else
+            term.setCursorPos(x, select(2, term.getCursorPos()))
+            print(line)
+            line = word
+        end
+    end
+
+    if #line > 0 then
+        term.setCursorPos(x, select(2, term.getCursorPos()))
+        print(line)
+    end
+end
+
 local function tf_question(message)
     local previous_colour = term.getTextColour()
 
@@ -112,14 +143,15 @@ local function tf_question(message)
     return tableContains(accept_chars, input_char)
 end
 
-local function mc_question(prompt_text, options, active_idx)
+local function mc_question(prompt_text, options, active_idx, details)
     active_idx = active_idx or 1
     local x,y = term.getCursorPos()
+    local w,h = term.getSize()
 
     term.setBackgroundColor(colors.black)
     term.setTextColor(colors.cyan)
     term.clearLine()
-    write(prompt_text)
+    write_wrapped(prompt_text, 1, w)
     
     for i,opt in ipairs(options) do
         term.setCursorPos(2, y+i)
@@ -134,6 +166,20 @@ local function mc_question(prompt_text, options, active_idx)
         write(opt)
     end
 
+    local detail_y = y + #options + 1
+    for row = detail_y, h - 1 do
+        term.setCursorPos(1, row)
+        term.setBackgroundColor(colors.black)
+        term.clearLine()
+    end
+
+    if details and details[active_idx] then
+        term.setCursorPos(1, detail_y)
+        term.setBackgroundColor(colors.black)
+        term.setTextColor(colors.lightGray)
+        write_wrapped(details[active_idx], 1, w)
+    end
+
     local key_name
     repeat
         local ev, key, is_held = os.pullEvent("key")
@@ -141,18 +187,47 @@ local function mc_question(prompt_text, options, active_idx)
         if key_name == "up" then
             active_idx = active_idx > 1 and active_idx-1 or #options
             term.setCursorPos(1, y)
-            return mc_question(prompt_text, options, active_idx)
+            return mc_question(prompt_text, options, active_idx, details)
         elseif key_name == "down" then
             active_idx = 1 + (active_idx % #options)
             term.setCursorPos(1, y)
-            return mc_question(prompt_text, options, active_idx)
+            return mc_question(prompt_text, options, active_idx, details)
         end
     until key_name == "enter"
 
     term.setBackgroundColor(colors.black)
-    term.setCursorPos(1, y + #options + 1)
+    term.setCursorPos(1, h)
 
     return active_idx
+end
+
+local function choose_device_type()
+    local options = { "Client", "Controller", "Server" }
+    local device_types = { "client", "controller", "server" }
+    local details = {
+        "Client: passive speaker node. It only receives synchronized audio from the server and does not provide search or playback controls.",
+        "Controller: remote control UI. It can search, manage queue, playback, loop, and server-wide volume after password auth. It does not play audio.",
+        "Server: central Redionet host. Install only one server per world.",
+    }
+
+    while true do
+        local choice_idx = mc_question("Assign this computer as", options, 1, details)
+        local device_type = device_types[choice_idx]
+
+        term.clear()
+        term.setCursorPos(1, 1)
+        term.setTextColor(colors.cyan)
+        write("Selected: ")
+        term.setTextColor(colors.white)
+        write_wrapped(details[choice_idx], 1, select(1, term.getSize()))
+
+        if tf_question("Confirm selection?") then
+            return device_type
+        end
+
+        term.clear()
+        term.setCursorPos(1, 1)
+    end
 end
 
 local function check_requirements()
@@ -231,13 +306,15 @@ local function check_peripherals(device_type)
             writeColoured(('\186 - %s: Missing (optional)\n'):format("playerDetector"), colors.lightBlue)
             -- Attach for fancy song announcements. (requires Advanced Peripherals mod) \177
         end
-    else
+    elseif device_type == 'client' then
         local pocket_client = pocket and not pocket.equipBottom
         if pocket_client then
             writeColoured(('Pocket Client (no audio)\n'), colors.green)
         elseif not locate("speaker") then
             writeColoured(('\15 - %s: Missing. Attach to play music.\n'):format("speaker"), colors.orange)
         end
+    elseif device_type == 'controller' then
+        writeColoured(('Controller mode: speaker not required.\n'), colors.green)
     end
 end
 
@@ -247,13 +324,12 @@ local function fresh_install()
     term.clear()
     term.setCursorPos(1, 1)
     check_requirements()
-    local repo_url = "github.com/Rypo/redionet"
+    local repo_url = "github.com/sevennnoff/redionet"
     writeColoured("\15 Redionet\n", colors.purple)
     writeColoured(("\161 %s\n"):format(repo_url), colors.lightGray)
     term.setTextColor(colors.white)
 
-    local choice_idx = mc_question('Assign this computer as', {'Client', 'Server   \4 only set one per world \4'})
-    local device_type = ({'client', 'server'})[choice_idx]
+    local device_type = choose_device_type()
     settings.set('redionet.device_type', device_type)
     
     local files = filemap[device_type]
@@ -262,7 +338,8 @@ local function fresh_install()
     settings.set('redionet.run_on_boot', run_on_boot)
 
     if run_on_boot then
-        files["./startup/init.lua"] = BASE_URL ..  device_type ..  "/startup/init.lua"
+        local startup_type = device_type == "controller" and "controller" or device_type
+        files["./startup/init.lua"] = BASE_URL ..  startup_type ..  "/startup/init.lua"
     end
 
     for path, download_url in pairs(files) do
@@ -290,7 +367,8 @@ local function fresh_install()
     check_peripherals(device_type)
 
     term.setTextColor(colors.lightGray)
-    print('\n' .. 'To execute program: ' .. (run_on_boot and "Reboot computer now" or ("Run `%s` in terminal"):format(device_type)))
+    local program_name = device_type == "server" and "server" or "client"
+    print('\n' .. 'To execute program: ' .. (run_on_boot and "Reboot computer now" or ("Run `%s` in terminal"):format(program_name)))
 
     settings.save()
 end
@@ -301,7 +379,8 @@ local function update(device_type)
     local run_on_boot = settings.get('redionet.run_on_boot', fs.exists(shell.resolve("./startup/init.lua")))
 
     if run_on_boot then
-        files["./startup/init.lua"] = BASE_URL ..  device_type ..  "/startup/init.lua"
+        local startup_type = device_type == "controller" and "controller" or device_type
+        files["./startup/init.lua"] = BASE_URL ..  startup_type ..  "/startup/init.lua"
     end
     
     local files_updated = false

@@ -16,6 +16,16 @@ local original_term = term.current() -- chat module will redirect term to design
 local chat = require('server_lib.chat')
 local audio = require("server_lib.audio")
 local network = require("server_lib.network")
+local auth = require("server_lib.auth")
+
+chat.authorize_rednet_chatbox = function(client_id)
+    return auth.is_authorized(client_id)
+end
+
+chat.authorize_chat_command = function(user)
+    local client_id = tonumber(tostring(user):match("^computer_#(%d+)$"))
+    return client_id and auth.is_authorized(client_id)
+end
 
 
 --[[ Global Server State ]]
@@ -32,6 +42,8 @@ STATE = {
         queue = {},             -- song queue, list of objects like active_song_meta
         active_song_meta = nil, -- Metadata for the song in the player {id=str, name=str, artist=str, duration={H=int, M=int, S=int}}
         loop_mode = 0,          -- 0: Off, 1: Queue/List, 2: Song
+        volume = 1.5,           -- server-wide volume, value between 0 and 3
+        controller_id = nil,    -- client id that entered the control password
 
         -- Network Status Info
         is_loading = false,     -- set in `network`, get in client.ui
@@ -70,6 +82,7 @@ local function restore_state(filename)
         STATE.data.queue            = state_data.queue
         STATE.data.active_song_meta = state_data.active_song_meta
         STATE.data.loop_mode        = state_data.loop_mode
+        STATE.data.volume           = state_data.volume or STATE.data.volume
         -- network status info ignored, irrelevant after reset
 
         pcall(function() fs.delete(filename) end) -- allow fail without compromising restore
@@ -78,7 +91,7 @@ end
 
 --[[ Server Loops ]]
 local function print_header_info()
-    local repo_url = "github.com/Rypo/redionet"
+    local repo_url = "github.com/sevennnoff/redionet"
     term.setTextColor(colors.purple)
     print("\n\15 Redionet")
     term.setTextColor(colors.lightGray)
@@ -88,9 +101,13 @@ local function print_header_info()
 end
 
 local function server_loop()
+    auth.init()
     print_header_info()
     term.setTextColor(colors.white)
     chat.writeto(('[READY] Server ID: %d\n'):format(os.getComputerID()))
+    if auth.state.generated_password then
+        chat.writeto(('[AUTH] Control password: %s\n'):format(auth.state.generated_password))
+    end
     local initial_clients = { rednet.lookup('PROTO_AUDIO') }
     if #initial_clients > 0 then
         chat.writeto(('Known client IDs: <%s>\n'):format(table.concat(initial_clients, ',\t')))
@@ -119,6 +136,12 @@ local function server_loop()
 
                     if code == "CONFIG" then
                         rednet.send(id, {code, rn_config}, 'PROTO_SERVER:REPLY')
+                    elseif code == "AUTH" then
+                        local ok = auth.verify(id, payload)
+                        STATE.data.controller_id = auth.get_controller()
+                        rednet.send(id, {code, ok}, 'PROTO_SERVER:REPLY')
+                        os.queueEvent('redionet:broadcast_state', "PROTO_SERVER: AUTH")
+                        chat.log_message(("Client #%d %s control auth"):format(id, ok and "passed" or "failed"), ok and "INFO" or "WARN")
                     elseif code == "PING" then
                         rednet.send(id, {code, "PONG"}, 'PROTO_SERVER:REPLY')
                     elseif code == "LOG" then
@@ -130,6 +153,12 @@ local function server_loop()
             function()
                 id, message = rednet.receive('PROTO_SERVER_QUEUE') -- Song queue management
                 local code, payload = table.unpack(message)
+
+                if not auth.is_authorized(id) then
+                    chat.log_message(("Rejected queue command from unauthorized client #%d"):format(id), "WARN")
+                    rednet.send(id, {"AUTH_REQUIRED", false}, 'PROTO_SERVER:REPLY')
+                    return
+                end
 
                 if code == "ADD" then
                     if payload.type == "playlist" then
@@ -158,6 +187,8 @@ local function server_loop()
                     STATE.data.status = 1
                     os.queueEvent('redionet:fetch_audio') -- TODO: monitor for interaction with Play Now
                 end
+
+                os.queueEvent('redionet:broadcast_state', "PROTO_SERVER_QUEUE: " .. tostring(code))
             end,
 
             function()
@@ -167,12 +198,19 @@ local function server_loop()
                 if code then
                     if code == "STATE" then
                         broadcast_state('PROTO__PLAYER: STATE')
+                    elseif not auth.is_authorized(id) then
+                        chat.log_message(("Rejected player command from unauthorized client #%d"):format(id), "WARN")
+                        rednet.send(id, {"AUTH_REQUIRED", false}, 'PROTO_SERVER:REPLY')
                     elseif code == "TOGGLE" then
                         audio.toggle_play_pause()
                     elseif code == "SKIP" then
                         audio.skip_song()
                     elseif code == "LOOP" then
                         STATE.data.loop_mode = payload
+                        os.queueEvent('redionet:broadcast_state', "PROTO_SERVER_PLAYER: LOOP")
+                    elseif code == "VOLUME" then
+                        STATE.data.volume = math.max(0, math.min(3, tonumber(payload) or STATE.data.volume))
+                        os.queueEvent('redionet:broadcast_state', "PROTO_SERVER_PLAYER: VOLUME")
                     end
                 end
             end,
@@ -230,7 +268,7 @@ local function server_event_loop()
                 os.pullEvent('redionet:update') -- Queued by command `rn update`
 
                 print('Updating...')
-                local install_url = "https://raw.githubusercontent.com/Rypo/redionet/refs/heads/main/install.lua"
+                local install_url = "https://raw.githubusercontent.com/sevennnoff/redionet/refs/heads/main/install.lua"
                 local tabid = shell.openTab('wget run ' .. install_url)
                 shell.switchTab(tabid)
             end,

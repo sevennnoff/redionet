@@ -6,10 +6,14 @@
 peripheral.find("modem", rednet.open)
 if not rednet.isOpen() then error("Failed to establish rednet connection. Attach a modem to continue.", 0) end
 
+settings.load()
+
 SERVER_ID = nil     -- set in setup_server_connection
 
 CLIENT_ID = os.getComputerID()
 HOST_NAME = 'client_'..CLIENT_ID
+DEVICE_TYPE = settings.get('redionet.device_type', 'client')
+IS_CONTROLLER = DEVICE_TYPE == 'controller'
 
 local ui = require("client_lib.ui")
 local receiver = require("client_lib.receiver")
@@ -21,13 +25,16 @@ CSTATE = {
     last_search_query = nil,    -- set in `net`, used in `net` and `ui`  
     search_results = nil,       -- list of at most 21 song_meta tables
     is_paused = false,          -- if true, client stops processing music data transmissions
-    volume = 1.5,               -- value between 0 and 3
+    is_authorized = false,      -- true after this client enters the server control password
+    is_controller = IS_CONTROLLER,
     error_status = false,       -- SEARCH_ERROR, false
     server_state = {
         active_song_meta = nil,
         queue = {},
         is_loading = false,
         loop_mode = 0,
+        volume = 1.5,
+        controller_id = nil,
         status = -1,
         error_status = false,
     }
@@ -78,12 +85,13 @@ local function setup_server_connection()
     return server_settings
 end
 
-if speaker then rednet.host('PROTO_AUDIO', HOST_NAME) else warn_speaker() end
+if not IS_CONTROLLER then
+    if speaker then rednet.host('PROTO_AUDIO', HOST_NAME) else warn_speaker() end
+end
 -- check speaker before connect to server to extend time warning visible
 local server_settings = setup_server_connection()
 
 
-settings.load()
 -- inherit client log level from server unless set locally
 if not settings.get('redionet.log_level') then
     settings.set('redionet.log_level', server_settings['redionet.log_level'])
@@ -121,7 +129,10 @@ local function client_loop()
             function ()
                 local id, server_state = rednet.receive('PROTO_SERVER_STATE')
                 CSTATE.server_state = server_state
-                os.queueEvent('redionet:redraw_screen')
+                CSTATE.is_authorized = server_state.controller_id == CLIENT_ID
+                if IS_CONTROLLER then
+                    os.queueEvent('redionet:redraw_screen')
+                end
             end,
             
             function ()
@@ -139,7 +150,7 @@ local function client_loop()
                     os.queueEvent('redionet:reload')
                 
                 elseif command == 'update' then
-                    local install_url = "https://raw.githubusercontent.com/Rypo/redionet/refs/heads/main/install.lua"
+                    local install_url = "https://raw.githubusercontent.com/sevennnoff/redionet/refs/heads/main/install.lua"
                     local tabid = shell.openTab('wget run ' .. install_url)
                     shell.switchTab(tabid)
 
@@ -191,13 +202,20 @@ local function system_stop_event()
 end
 
 -- Start main client loops
-parallel.waitForAny(
-    system_stop_event,
-    client_loop,
-    ui.ui_loop,
-    net.http_search_loop,
-    receiver.receive_loop
-)
+if IS_CONTROLLER then
+    parallel.waitForAny(
+        system_stop_event,
+        client_loop,
+        ui.ui_loop,
+        net.http_search_loop
+    )
+else
+    parallel.waitForAny(
+        system_stop_event,
+        client_loop,
+        receiver.receive_loop
+    )
+end
 
 if     on_exit == 'reload' then shell.run('client')
 elseif on_exit == 'reboot' then os.reboot()
