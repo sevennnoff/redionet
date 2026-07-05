@@ -168,6 +168,7 @@ local function transmit_audio(data_buffer)
         song_id = data_buffer.song_id,
         chunk_id = data_buffer.total_write.chunks,
         audio_position_sec = previous.audio_position_sec,
+        chunk_dur_sec = audio_dur_sec,
         volume = STATE.data.volume,
         bass_boost = STATE.data.bass_boost,
         format = "dfpwm",
@@ -237,7 +238,11 @@ local function transmit_audio(data_buffer)
 
         parallel.waitForAny(
             function ()
-                rednet.broadcast({audio_chunk, sub_state}, REDIONET_PROTO.AUDIO)
+                for id, status in pairs(istate.receiver_stats) do
+                    if status == 1 then
+                        rednet.send(id, {audio_chunk, sub_state}, REDIONET_PROTO.AUDIO)
+                    end
+                end
                 time_audio_sent = os.epoch("local")
                 while true do os.pullEvent() end
             end,
@@ -281,10 +286,10 @@ local function transmit_audio(data_buffer)
         local sync_wait = TICK
 
         if sub_state.chunk_id == 1 then
-            sync_wait = 2*sync_wait -- 2 tick on start
-        else
-            os.queueEvent('redionet:sync') -- stops speakers and sets audio.state.speaker_cache = 0
+            sync_wait = 2 * sync_wait
+            os.queueEvent('redionet:sync')
         end
+        -- rejoin mid-track: no global CLIENT_SYNC — barrier waits for the slow client instead
 
         chat.log_message(('Audio sync. Listening: %d/%d'):format(M.state.num_active, M.state.n_receivers), "INFO")
 

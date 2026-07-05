@@ -126,8 +126,28 @@ function M.toggle_play_local()
     end
 end
 
+local function wait_chunk_played(duration_sec, state)
+    if not duration_sec or duration_sec <= 0 then return true end
+
+    local timer = os.startTimer(duration_sec)
+    repeat
+        local ev, tid = os.pullEvent()
+        if ev == "redionet:playback_stopped"
+            or CSTATE.is_paused
+            or state.active_stream_id ~= state.song_id then
+            os.cancelTimer(timer)
+            return false
+        end
+        if ev == "timer" and tid == timer then
+            return true
+        end
+    until false
+end
+
 local function play_audio(buffer, state)
-    if not buffer or CSTATE.is_paused or state.active_stream_id ~= state.song_id then return end
+    if not buffer or CSTATE.is_paused or state.active_stream_id ~= state.song_id then
+        return false
+    end
 
     if state.volume then
         CSTATE.server_state.volume = state.volume
@@ -149,8 +169,11 @@ local function play_audio(buffer, state)
                 state.active_stream_id = "HALT"
             end
         )
-        if CSTATE.is_paused or state.active_stream_id ~= state.song_id then return end
+        if CSTATE.is_paused or state.active_stream_id ~= state.song_id then return false end
     end
+
+    local duration_sec = state.chunk_dur_sec or (#buffer / 48000)
+    return wait_chunk_played(duration_sec, state)
 end
 
 function M.receive_loop()
@@ -179,8 +202,9 @@ function M.receive_loop()
                     else
                         local payload, sub_state = table.unpack(message)
                         local buffer = pcm_from_payload(payload, sub_state)
-                        play_audio(buffer, sub_state)
-                        rednet.send(id, (not CSTATE.is_paused) and "request_next_chunk" or "playback_stopped", REDIONET_PROTO.AUDIO_NEXT)
+                        local played = play_audio(buffer, sub_state)
+                        local ack = played and (not CSTATE.is_paused) and "request_next_chunk" or "playback_stopped"
+                        rednet.send(id, ack, REDIONET_PROTO.AUDIO_NEXT)
                     end
                 end
             end,
