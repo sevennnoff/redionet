@@ -21,12 +21,11 @@ M.state = {
     need_sync = false,
     speaker_cache = 0.0, -- seconds
     prefill_end = true,
-    last_maintain_sync_ms = nil,
 }
 
 local speaker_cache_target = AUDIO_CHUNK_SEC/2 -- sec of audio stored in speakers at anytime. Higher = latency desync protection. Lower = reduced resync audio gaps
 local first_response_timeout = AUDIO_CHUNK_SEC
-local MAINTAIN_SYNC_SEC = 15 -- periodic CLIENT_SYNC on long tracks (full flush)
+local DESYNC_RESYNC_MS = 2500
 
 local previous = {
     req_chunk_times = {},
@@ -152,27 +151,6 @@ local function round_tick_sec(seconds)
     return math.ceil(math.max(seconds, TICK) * 20) * TICK -- 20 tick/sec
 end
 
-local function maintain_periodic_sync()
-    if STATE.data.status ~= 1 then return end
-    local now = os.epoch("local")
-    if not M.state.last_maintain_sync_ms then
-        M.state.last_maintain_sync_ms = now
-        return
-    end
-    if now - M.state.last_maintain_sync_ms < MAINTAIN_SYNC_SEC * 1000 then return end
-
-    M.state.last_maintain_sync_ms = now
-    M.state.speaker_cache = 0
-    chat.log_message(('Periodic sync maintain (%ds)'):format(MAINTAIN_SYNC_SEC), 'INFO')
-    rednet.broadcast('sync', REDIONET_PROTO.CLIENT_SYNC)
-
-    local settle = os.startTimer(0.12)
-    repeat
-        local _, tid = os.pullEvent("timer")
-    until tid == settle
-    os.cancelTimer(settle)
-end
-
 local function wait_speakers(max_wait, eps)
     max_wait = max_wait or 1.000
 
@@ -207,8 +185,6 @@ local function transmit_audio(data_buffer)
     previous.audio_position_sec = previous.audio_position_sec + audio_dur_sec
     STATE.data.audio_position_sec = sub_state.audio_position_sec
     STATE.audio_position_epoch_ms = os.epoch("local")
-
-    maintain_periodic_sync()
 
     if M.state.n_receivers == 0 then
         chat.log_message('No visible client connections... Stopping', 'WARN')
@@ -339,8 +315,8 @@ local function transmit_audio(data_buffer)
         local desync_ms = (math.max(table.unpack(reply.times)) - math.min(table.unpack(reply.times)))--/Gms
         chat.log_message(string.format('max client desync: %dms | n=%d/%d', desync_ms, #reply.times, play_state.n_receivers), "INFO")
 
-        if desync_ms > 800 then
-            chat.log_message('Detected client desync. Forcing sync..', "WARN")
+        if desync_ms > DESYNC_RESYNC_MS then
+            chat.log_message(('Detected client desync (%dms). Forcing sync..'):format(desync_ms), "WARN")
             
             local id_order, delay = {'ID:'}, {'LAG'}
             for i,id in ipairs(reply.ids) do
@@ -394,7 +370,6 @@ local function process_audio_data(data_buffer)
     M.state.speaker_cache = 0
     M.state.need_sync = true -- always sync on new song
     M.state.prefill_end = true
-    M.state.last_maintain_sync_ms = nil
 
     previous = {
         req_chunk_times = {},
@@ -589,6 +564,19 @@ function M.audio_loop()
             end
         end
     )
+end
+
+function M.get_listener_snapshot()
+    local clients = {}
+    for id, status in pairs(M.state.receiver_stats) do
+        table.insert(clients, { id = id, active = status == 1 })
+    end
+    table.sort(clients, function(a, b) return a.id < b.id end)
+    return {
+        total = M.state.n_receivers,
+        active = M.state.num_active,
+        clients = clients,
+    }
 end
 
 return M

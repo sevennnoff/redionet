@@ -206,20 +206,6 @@ local function draw_level_slider(slider_cfg, level, label)
     term.write(percent_str)
 end
 
-local function adjust_volume(delta)
-    request_auth(function()
-        receiver.send_server_volume(clamp03((CSTATE.server_state.volume or 1.5) + delta))
-        M.redraw_screen()
-    end)
-end
-
-local function adjust_bass(delta)
-    request_auth(function()
-        receiver.send_server_bass(clamp03((CSTATE.server_state.bass_boost or 0) + delta))
-        M.redraw_screen()
-    end)
-end
-
 local function slider_level_from_x(slider_cfg, x)
     local label_w = 4
     local bar_x = slider_cfg.x + label_w
@@ -378,6 +364,24 @@ local function draw_now_playing_tab()
             term.setTextColor(config.colors.text_secondary)
             term.setCursorPos(config.ui.xpos, y)
             term.write(song.artist)
+        end
+    end
+
+    if CSTATE.is_controller then
+        local info = CSTATE.server_state.listeners
+        local y = config.term_height
+        term.setCursorPos(config.ui.xpos, y)
+        term.clearLine()
+        term.setTextColor(colors.lightGray)
+        if info and info.clients and #info.clients > 0 then
+            local ids = {}
+            for _, c in ipairs(info.clients) do
+                table.insert(ids, ("#%d%s"):format(c.id, c.active and "" or "°"))
+            end
+            local line = ("Speakers %d/%d: "):format(info.active or 0, info.total or 0) .. table.concat(ids, " ")
+            term.write(truncate(line, config.term_width - config.ui.xpad))
+        else
+            term.write("Speakers 0/0")
         end
     end
 end
@@ -581,6 +585,20 @@ local function handle_auth_input()
     M.state.input_mode = nil
     M.state.waiting_for_input = false
     M.redraw_screen()
+end
+
+local function adjust_volume(delta)
+    request_auth(function()
+        receiver.send_server_volume(clamp03((CSTATE.server_state.volume or 1.5) + delta))
+        M.redraw_screen()
+    end)
+end
+
+local function adjust_bass(delta)
+    request_auth(function()
+        receiver.send_server_bass(clamp03((CSTATE.server_state.bass_boost or 0) + delta))
+        M.redraw_screen()
+    end)
 end
 
 local function handle_search_input()

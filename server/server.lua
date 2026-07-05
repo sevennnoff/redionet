@@ -250,8 +250,8 @@ local function server_loop()
                 
                 if code then
                     if code == "STATE" then
-                        -- Unicast only to the requester; broadcasting on poll floods rednet during playback.
                         extrapolate_audio_position()
+                        STATE.data.listeners = audio.get_listener_snapshot()
                         rednet.send(id, STATE.data, REDIONET_PROTO.SERVER_STATE)
                     elseif not auth.is_authorized(id) then
                         chat.log_message(("Rejected player command from unauthorized client #%d"):format(id), "WARN")
