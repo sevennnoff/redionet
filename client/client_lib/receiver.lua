@@ -3,6 +3,8 @@
     Handles server communications and audio playback.
 ]]
 
+local bass_boost = require("client_lib.bass_boost")
+
 local speaker = peripheral.find("speaker")
 
 local dbgmon = function (message) end
@@ -106,9 +108,11 @@ local function play_audio(buffer, state)
         CSTATE.server_state.volume = state.volume
     end
     local volume = state.volume or CSTATE.server_state.volume or 1.5
-    dbgmon(('- %0.3fs - chunk: %d, song: %s, vol: %0.2f'):format(
-        state.audio_position_sec, state.chunk_id, state.song_id, volume))
+    dbgmon(('- %0.3fs - chunk: %d, song: %s, vol: %0.2f bass: %s'):format(
+        state.audio_position_sec, state.chunk_id, state.song_id, volume, bass_boost.format_pct()))
     os.queueEvent("redionet:audio_timestamp", state.audio_position_sec)
+
+    bass_boost.process(buffer, state.song_id)
 
     while not speaker.playAudio(buffer, volume) do
         dbgmon('SPEAKER FULL')
@@ -159,6 +163,7 @@ function M.receive_loop()
             function ()
                 while true do
                     local id, message = rednet.receive(REDIONET_PROTO.AUDIO_HALT)
+                    bass_boost.clear()
                     speaker.stop()
                     os.queueEvent("redionet:playback_stopped")
                     rednet.send(id, "playback_interrupted", REDIONET_PROTO.AUDIO_NEXT)
