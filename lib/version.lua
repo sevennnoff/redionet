@@ -1,1 +1,1 @@
-return "2026-07-05-chunk-ack"
+return "2026-07-05-soft-sync"

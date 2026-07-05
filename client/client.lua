@@ -53,6 +53,7 @@ CSTATE = {
         loop_mode = 0,
         volume = 1.5,
         bass_boost = 0,
+        sync_buffer = 1.5,
         controller_id = nil,
         status = -1,
         error_status = false,

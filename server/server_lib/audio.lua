@@ -20,12 +20,62 @@ M.state = {
     num_active = 0,
     n_receivers = 0,
     need_sync = false,
+    pending_resync = false,
+    last_maintain_sync_ms = nil,
+    last_soft_resync_ms = nil,
+    last_desync_ms = 0,
     speaker_cache = 0.0, -- seconds
     prefill_end = true,
 }
 
-local speaker_cache_target = AUDIO_CHUNK_SEC/2 -- sec of audio stored in speakers at anytime. Higher = latency desync protection. Lower = reduced resync audio gaps
-local first_response_timeout = AUDIO_CHUNK_SEC + speaker_cache_target
+local SOFT_DESYNC_MS = 450
+local HARD_DESYNC_MS = 1500
+local RESYNC_COOLDOWN_MS = 45000
+local MAINTAIN_SYNC_SEC = 90
+
+local function get_speaker_cache_target()
+    local level = STATE.data.sync_buffer
+    if level == nil then level = 1.5 end
+    local scale = 0.55 + (level / 3) * 1.0
+    return (AUDIO_CHUNK_SEC / 2) * scale
+end
+
+local function first_response_timeout_sec()
+    return AUDIO_CHUNK_SEC + get_speaker_cache_target()
+end
+
+local function maintain_periodic_sync()
+    if STATE.data.status ~= 1 then return end
+    local now = os.epoch("local")
+    if not M.state.last_maintain_sync_ms then
+        M.state.last_maintain_sync_ms = now
+        return
+    end
+    if now - M.state.last_maintain_sync_ms < MAINTAIN_SYNC_SEC * 1000 then return end
+    M.state.last_maintain_sync_ms = now
+    if M.state.last_desync_ms > SOFT_DESYNC_MS then
+        M.state.pending_resync = true
+        chat.log_message(('Periodic maintain (last desync %dms)'):format(M.state.last_desync_ms), 'INFO')
+    end
+end
+
+local function apply_pending_resync()
+    if not M.state.pending_resync then return end
+    M.state.pending_resync = false
+
+    local now = os.epoch("local")
+    if M.state.last_soft_resync_ms and (now - M.state.last_soft_resync_ms) < RESYNC_COOLDOWN_MS then
+        return
+    end
+
+    chat.log_message('Soft resync at chunk boundary', 'INFO')
+    os.queueEvent('redionet:sync')
+    local sync_timer = os.startTimer(TICK * 2)
+    repeat _, tid = os.pullEvent('timer') until tid == sync_timer
+    os.cancelTimer(sync_timer)
+    M.state.speaker_cache = 0
+    M.state.last_soft_resync_ms = now
+end
 
 local function parse_connection_payload(payload)
     if type(payload) == "table" then
@@ -218,15 +268,8 @@ local function transmit_audio(data_buffer)
         chat.log_message('No visible client connections... Stopping', 'WARN')
         return M.stop_song()
     end
-    
 
-    local reply = {ids = {}, times = {}}
-
-    local play_state = {
-        receiver_stats = {},
-        n_receivers = 0,
-        num_active = 0,
-    }
+    maintain_periodic_sync()
 
     local time_audio_sent
     local ok, err
@@ -249,6 +292,16 @@ local function transmit_audio(data_buffer)
         M.state.need_sync = false
     end
 
+    apply_pending_resync()
+
+    local reply = {ids = {}, times = {}}
+
+    local play_state = {
+        receiver_stats = {},
+        n_receivers = 0,
+        num_active = 0,
+    }
+
     for attempt = 1, 3 do
         reply = {ids = {}, times = {}}
         play_state = {
@@ -266,7 +319,7 @@ local function transmit_audio(data_buffer)
         }
         for id, status in pairs(M.state.receiver_stats) do istate.receiver_stats[id] = status end
 
-        local timeout = speaker_cache_target
+        local timeout = get_speaker_cache_target()
         local timer, fallback_timer, tid
 
         local function all_receivers_replied()
@@ -282,7 +335,7 @@ local function transmit_audio(data_buffer)
             function ()
                 rednet.broadcast({audio_chunk, sub_state}, REDIONET_PROTO.AUDIO)
                 time_audio_sent = os.epoch("local")
-                fallback_timer = os.startTimer(first_response_timeout)
+                fallback_timer = os.startTimer(first_response_timeout_sec())
                 while true do os.pullEvent() end
             end,
             function ()
@@ -369,7 +422,18 @@ local function transmit_audio(data_buffer)
 
     if #reply.times > 1 then
         local desync_ms = (math.max(table.unpack(reply.times)) - math.min(table.unpack(reply.times)))--/Gms
-        chat.log_message(string.format('max client desync: %dms | n=%d/%d', desync_ms, #reply.times, play_state.n_receivers), "DEBUG")
+        M.state.last_desync_ms = desync_ms
+        chat.log_message(string.format('max client desync: %dms | n=%d/%d', desync_ms, #reply.times, play_state.n_receivers),
+            desync_ms > SOFT_DESYNC_MS and "INFO" or "DEBUG")
+
+        if desync_ms > HARD_DESYNC_MS then
+            M.state.pending_resync = true
+            chat.log_message(('High desync %dms — soft resync queued'):format(desync_ms), 'WARN')
+        elseif desync_ms > SOFT_DESYNC_MS then
+            local brake_sec = round_tick_sec((desync_ms - SOFT_DESYNC_MS) / 1000 * 0.5)
+            M.state.speaker_cache = M.state.speaker_cache + brake_sec
+            chat.log_message(('Soft brake +%0.2fs (desync %dms)'):format(brake_sec, desync_ms), 'INFO')
+        end
     end
 
 
@@ -390,7 +454,7 @@ local function transmit_audio(data_buffer)
     local free_sec = audio_dur_sec - elapsed_sec
 
     M.state.speaker_cache = M.state.speaker_cache + free_sec
-    local wait_seconds = round_tick_sec(M.state.speaker_cache - speaker_cache_target - 0.005)
+    local wait_seconds = round_tick_sec(M.state.speaker_cache - get_speaker_cache_target() - 0.005)
 
     chat.log_message(('elap: %0.3fs, free: %0.3fs, audio: %0.3fs\n'..'SpkCache: %0.3fs, total_wait: %0.3fs'):format(
         elapsed_sec, free_sec, audio_dur_sec,  M.state.speaker_cache, wait_seconds), "DEBUG")
@@ -416,6 +480,9 @@ local function process_audio_data(data_buffer)
     M.state.speaker_cache = 0
     M.state.need_sync = true -- always sync on new song
     M.state.prefill_end = true
+    M.state.pending_resync = false
+    M.state.last_maintain_sync_ms = nil
+    M.state.last_desync_ms = 0
 
     previous = {
         req_chunk_times = {},

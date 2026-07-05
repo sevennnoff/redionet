@@ -57,7 +57,8 @@ config.ui = {
     loop_button =   { x = xpos + 15, y = 6, width = 10, labels = { " Loop Off ", " Loop All ", " Loop One " } },
     volume_slider = { x = xpos,      y = 8, width = 25 },
     bass_slider =   { x = xpos,      y = 9, width = 25 },
-    queue = { start_y = 11, height = 2 },
+    sync_slider =   { x = xpos,      y = 10, width = 25 },
+    queue = { start_y = 12, height = 2 },
 
     -- Search Tab
     search_bar = { x = xpos, y = 3, width = config.term_width - 2*xpad, height = 3 },
@@ -352,6 +353,7 @@ local function draw_now_playing_tab()
     -- Volume + bass sliders (server-wide)
     draw_level_slider(config.ui.volume_slider, CSTATE.server_state.volume or 1.5, "Vol")
     draw_level_slider(config.ui.bass_slider, CSTATE.server_state.bass_boost or 0, "Bas")
+    draw_level_slider(config.ui.sync_slider, CSTATE.server_state.sync_buffer or 1.5, "Buf")
 
     
     -- Queue
@@ -623,6 +625,13 @@ local function adjust_bass(delta)
     end)
 end
 
+local function adjust_sync_buffer(delta)
+    request_auth(function()
+        receiver.send_server_sync_buffer(clamp03((CSTATE.server_state.sync_buffer or 1.5) + delta))
+        M.redraw_screen()
+    end)
+end
+
 local function handle_search_input()
     local sbar = config.ui.search_bar
     paintutils.drawFilledBox(sbar.x, sbar.y, sbar.x + sbar.width - 1, sbar.y + sbar.height - 1, config.colors.search_bar_active)
@@ -755,6 +764,10 @@ local function handle_click(button, x, y)
             if is_in_box(x, y, config.ui.bass_slider) then
                 request_auth(function() receiver.send_server_bass(slider_level_from_x(config.ui.bass_slider, x)) end)
             end
+        elseif y == config.ui.sync_slider.y then
+            if is_in_box(x, y, config.ui.sync_slider) then
+                request_auth(function() receiver.send_server_sync_buffer(slider_level_from_x(config.ui.sync_slider, x)) end)
+            end
         end
         
         M.redraw_screen()
@@ -792,6 +805,8 @@ local function handle_drag(button, x, y)
         M.redraw_screen()
     elseif y == config.ui.bass_slider.y and is_in_box(x, y, config.ui.bass_slider) then
         receiver.send_server_bass(slider_level_from_x(config.ui.bass_slider, x))
+    elseif y == config.ui.sync_slider.y and is_in_box(x, y, config.ui.sync_slider) then
+        receiver.send_server_sync_buffer(slider_level_from_x(config.ui.sync_slider, x))
         M.redraw_screen()
     end
 end

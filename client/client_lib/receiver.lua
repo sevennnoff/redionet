@@ -88,6 +88,10 @@ function M.send_server_bass(bass)
     return M.send_server_player("BASS", bass)
 end
 
+function M.send_server_sync_buffer(level)
+    return M.send_server_player("BUFFER", level)
+end
+
 local function send_audio_connection(status)
     rednet.send(SERVER_ID, {status, REDIONET_VERSION}, REDIONET_PROTO.AUDIO_CONNECTION)
 end
