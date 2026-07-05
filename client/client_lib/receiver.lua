@@ -1,15 +1,15 @@
 --[[
     Receiver module
-    Barrier sync: decode DFPWM wire from server, playAudio, ack.
+    Two-phase barrier: buffer chunk -> PLAY signal -> play in sync -> ack.
 ]]
-
-local dfpwm = require("cc.audio.dfpwm")
 
 local speaker = peripheral.find("speaker")
 
 local dbgmon = function() end
-local stream_decoder = dfpwm.make_decoder()
-local stream_id = nil
+local WAIT_TICK = 0.05
+local PLAY_LEAD_MS = 300
+
+local pending = nil -- { buffer, sub_state }
 
 local function debug_init()
     settings.load()
@@ -33,26 +33,10 @@ local function debug_init()
     end
 end
 
-local function reset_decoder(new_stream_id)
-    if new_stream_id ~= stream_id then
-        stream_decoder = dfpwm.make_decoder()
-        stream_id = new_stream_id
-    end
-end
-
-local function pcm_from_payload(payload, sub_state)
-    if type(payload) == "string" or sub_state.format == "dfpwm" then
-        reset_decoder(sub_state.active_stream_id)
-        return stream_decoder(payload)
-    end
-    return payload
-end
-
 local M = {}
 
 function M.reset_stream()
-    stream_decoder = dfpwm.make_decoder()
-    stream_id = nil
+    pending = nil
     if speaker then speaker.stop() end
 end
 
@@ -126,54 +110,97 @@ function M.toggle_play_local()
     end
 end
 
-local function wait_chunk_played(duration_sec, state)
-    if not duration_sec or duration_sec <= 0 then return true end
+local function wait_lead_ms(lead_ms, state)
+    lead_ms = lead_ms or PLAY_LEAD_MS
+    local deadline = os.epoch("local") + lead_ms
 
-    local timer = os.startTimer(duration_sec)
-    repeat
-        local ev, tid = os.pullEvent()
-        if ev == "redionet:playback_stopped"
-            or CSTATE.is_paused
-            or state.active_stream_id ~= state.song_id then
-            os.cancelTimer(timer)
+    while os.epoch("local") < deadline do
+        if CSTATE.is_paused or state.active_stream_id ~= state.song_id then
             return false
         end
-        if ev == "timer" and tid == timer then
-            return true
-        end
-    until false
+        local timer = os.startTimer(math.min(WAIT_TICK, (deadline - os.epoch("local")) / 1000))
+        repeat
+            local ev, tid = os.pullEvent()
+            if ev == "redionet:playback_stopped" then return false end
+            if ev == "timer" and tid == timer then break end
+        until false
+    end
+    return true
 end
 
-local function play_audio(buffer, state)
-    if not buffer or CSTATE.is_paused or state.active_stream_id ~= state.song_id then
-        return false
+local function wait_speaker_drained(duration_sec, state)
+    local fallback = os.startTimer((duration_sec or 2.7) + 0.15)
+    while true do
+        if CSTATE.is_paused or state.active_stream_id ~= state.song_id then
+            os.cancelTimer(fallback)
+            return false
+        end
+        local ev, tid = os.pullEvent()
+        if ev == "speaker_audio_empty" then
+            os.cancelTimer(fallback)
+            return true
+        end
+        if ev == "redionet:playback_stopped" then
+            os.cancelTimer(fallback)
+            return false
+        end
+        if ev == "timer" and tid == fallback then
+            return true
+        end
     end
+end
 
-    if state.volume then
-        CSTATE.server_state.volume = state.volume
-    end
-    if state.bass_boost ~= nil then
-        CSTATE.server_state.bass_boost = state.bass_boost
-    end
-    local volume = state.volume or CSTATE.server_state.volume or 1.5
-    dbgmon(('- %0.3fs - chunk: %d, vol: %0.2f'):format(
-        state.audio_position_sec, state.chunk_id, volume))
-    os.queueEvent("redionet:audio_timestamp", state.audio_position_sec)
+local function play_buffered(state)
+    if not pending or CSTATE.is_paused then return false end
+    local buffer = pending.buffer
+    local sub = pending.sub_state
+    pending = nil
+
+    if sub.volume then CSTATE.server_state.volume = sub.volume end
+    if sub.bass_boost ~= nil then CSTATE.server_state.bass_boost = sub.bass_boost end
+    local volume = sub.volume or CSTATE.server_state.volume or 1.5
+    local duration_sec = sub.chunk_dur_sec or (#buffer / 48000)
+
+    dbgmon(('- %0.3fs - chunk: %d PLAY'):format(sub.audio_position_sec, sub.chunk_id))
+    os.queueEvent("redionet:audio_timestamp", sub.audio_position_sec)
 
     while not speaker.playAudio(buffer, volume) do
-        dbgmon('SPEAKER FULL')
         parallel.waitForAny(
             function() os.pullEvent("speaker_audio_empty") end,
-            function()
-                os.pullEvent("redionet:playback_stopped")
-                state.active_stream_id = "HALT"
-            end
+            function() os.pullEvent("redionet:playback_stopped") end
         )
         if CSTATE.is_paused or state.active_stream_id ~= state.song_id then return false end
     end
 
-    local duration_sec = state.chunk_dur_sec or (#buffer / 48000)
-    return wait_chunk_played(duration_sec, state)
+    return wait_speaker_drained(duration_sec, state)
+end
+
+local function on_audio_chunk(message)
+    local buffer, sub_state = table.unpack(message)
+    if CSTATE.is_paused or not buffer then
+        return "playback_stopped"
+    end
+    pending = { buffer = buffer, sub_state = sub_state }
+    dbgmon(("buffer chunk %d"):format(sub_state.chunk_id))
+    return "buffer_ready"
+end
+
+local function on_play_signal(signal, server_id)
+    if CSTATE.is_paused or not pending then
+        return "playback_stopped"
+    end
+    if signal.active_stream_id ~= pending.sub_state.active_stream_id
+        or signal.chunk_id ~= pending.sub_state.chunk_id then
+        return "buffer_ready"
+    end
+
+    if not wait_lead_ms(signal.lead_ms, pending.sub_state) then
+        pending = nil
+        return "playback_stopped"
+    end
+
+    local ok = play_buffered(pending.sub_state)
+    return ok and "request_next_chunk" or "playback_stopped"
 end
 
 function M.receive_loop()
@@ -196,16 +223,16 @@ function M.receive_loop()
             function()
                 while true do
                     local id, message = rednet.receive(REDIONET_PROTO.AUDIO)
+                    local ack = on_audio_chunk(message)
+                    rednet.send(id, ack, REDIONET_PROTO.AUDIO_NEXT)
+                end
+            end,
 
-                    if CSTATE.is_paused then
-                        rednet.send(id, "playback_stopped", REDIONET_PROTO.AUDIO_NEXT)
-                    else
-                        local payload, sub_state = table.unpack(message)
-                        local buffer = pcm_from_payload(payload, sub_state)
-                        local played = play_audio(buffer, sub_state)
-                        local ack = played and (not CSTATE.is_paused) and "request_next_chunk" or "playback_stopped"
-                        rednet.send(id, ack, REDIONET_PROTO.AUDIO_NEXT)
-                    end
+            function()
+                while true do
+                    local id, signal = rednet.receive(REDIONET_PROTO.AUDIO_PLAY)
+                    local ack = on_play_signal(signal, id)
+                    rednet.send(SERVER_ID, ack, REDIONET_PROTO.AUDIO_NEXT)
                 end
             end,
 
