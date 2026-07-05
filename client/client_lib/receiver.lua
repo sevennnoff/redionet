@@ -3,11 +3,10 @@
     Handles server communications and audio playback.
 ]]
 
-local bass_boost = require("client_lib.bass_boost")
-
 local speaker = peripheral.find("speaker")
 
 local dbgmon = function (message) end
+local WAIT_TICK = 0.05
 
 local function debug_init()
     settings.load()
@@ -105,6 +104,30 @@ function M.toggle_play_local()
     end
 end
 
+local function wait_until_play_at(play_at_ms, state)
+    if not play_at_ms then return true end
+
+    while true do
+        if CSTATE.is_paused or state.active_stream_id ~= state.song_id then
+            return false
+        end
+
+        local now = os.epoch("local")
+        if now >= play_at_ms then return true end
+
+        local timer = os.startTimer(math.min((play_at_ms - now) / 1000, WAIT_TICK))
+        repeat
+            local ev, tid = os.pullEvent()
+            if ev == "redionet:playback_stopped" then
+                os.cancelTimer(timer)
+                return false
+            end
+            if ev == "timer" and tid == timer then break end
+        until false
+        os.cancelTimer(timer)
+    end
+end
+
 local function play_audio(buffer, state)
     if not buffer or CSTATE.is_paused or state.active_stream_id ~= state.song_id then return end
 
@@ -115,13 +138,12 @@ local function play_audio(buffer, state)
         CSTATE.server_state.bass_boost = state.bass_boost
     end
     local volume = state.volume or CSTATE.server_state.volume or 1.5
-    local bass = state.bass_boost
-    if bass == nil then bass = CSTATE.server_state.bass_boost or 0 end
-    dbgmon(('- %0.3fs - chunk: %d, vol: %0.2f bass: %0.1f'):format(
-        state.audio_position_sec, state.chunk_id, volume, bass))
+    dbgmon(('- %0.3fs - chunk: %d, vol: %0.2f lead: %dms'):format(
+        state.audio_position_sec, state.chunk_id, volume,
+        state.play_at_ms and math.max(0, state.play_at_ms - os.epoch("local")) or 0))
     os.queueEvent("redionet:audio_timestamp", state.audio_position_sec)
 
-    bass_boost.process(buffer, state.song_id, bass)
+    if not wait_until_play_at(state.play_at_ms, state) then return end
 
     while not speaker.playAudio(buffer, volume) do
         dbgmon('SPEAKER FULL')
@@ -172,7 +194,6 @@ function M.receive_loop()
             function ()
                 while true do
                     local id, message = rednet.receive(REDIONET_PROTO.AUDIO_HALT)
-                    bass_boost.clear()
                     speaker.stop()
                     os.queueEvent("redionet:playback_stopped")
                     rednet.send(id, "playback_interrupted", REDIONET_PROTO.AUDIO_NEXT)

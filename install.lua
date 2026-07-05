@@ -13,7 +13,7 @@ local prog_args = { ... }
 
 
 local BASE_URL = "https://raw.githubusercontent.com/sevennnoff/redionet/refs/heads/main/"
-local INSTALL_VERSION = "2026-07-05-slowest-barrier"
+local INSTALL_VERSION = "2026-07-05-scheduled-play"
 
 local filemap = {}
 
@@ -23,6 +23,7 @@ filemap["server"] = {
     ["./server_lib/auth.lua"] = BASE_URL ..     "server/server_lib/auth.lua",
     ["./server_lib/chat.lua"] = BASE_URL ..     "server/server_lib/chat.lua",
     ["./server_lib/network.lua"] = BASE_URL ..  "server/server_lib/network.lua",
+    ["./server_lib/bass_boost.lua"] = BASE_URL .. "server/server_lib/bass_boost.lua",
 }
 
 filemap["client"] = {
