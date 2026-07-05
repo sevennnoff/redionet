@@ -219,7 +219,7 @@ local function transmit_audio(data_buffer)
         }
         for id, status in pairs(M.state.receiver_stats) do istate.receiver_stats[id] = status end
 
-        local timeout = speaker_cache_target
+        local timeout = AUDIO_CHUNK_SEC -- allow slowest speaker to drain before eviction
         local timer, fallback_timer, tid
 
         local function all_receivers_replied()
@@ -273,13 +273,26 @@ local function transmit_audio(data_buffer)
 
             function ()
                 repeat _,tid = os.pullEvent('timer') until (timer and tid == timer) or (fallback_timer and tid == fallback_timer)
+                local slow_ids = {}
                 for id, status in pairs(istate.receiver_stats) do
                     if not play_state.receiver_stats[id] then
-                        rednet.send(id, "audio.stop_song", REDIONET_PROTO.AUDIO_HALT)
-                        M.state.receiver_stats[id] = nil
-                        M.state.n_receivers = M.state.n_receivers - 1
-                        M.state.num_active = M.state.num_active - (status == 1 and 1 or 0)
-                        chat.log_message(('Client #%d timed out, halted'):format(id), 'WARN')
+                        table.insert(slow_ids, {id = id, status = status})
+                    end
+                end
+                if #slow_ids > 0 then
+                    local n_expected = 0
+                    for _ in pairs(istate.receiver_stats) do n_expected = n_expected + 1 end
+                    if #slow_ids >= n_expected then
+                        chat.log_message('All clients missed chunk ack — resync on next chunk', 'WARN')
+                        M.state.need_sync = true
+                    else
+                        for _, client in ipairs(slow_ids) do
+                            rednet.send(client.id, "audio.stop_song", REDIONET_PROTO.AUDIO_HALT)
+                            M.state.receiver_stats[client.id] = nil
+                            M.state.n_receivers = M.state.n_receivers - 1
+                            M.state.num_active = M.state.num_active - (client.status == 1 and 1 or 0)
+                            chat.log_message(('Client #%d timed out, halted'):format(client.id), 'WARN')
+                        end
                     end
                 end
             end
@@ -295,8 +308,8 @@ local function transmit_audio(data_buffer)
 
         if sub_state.chunk_id == 1 then
             sync_wait = 2*sync_wait
-            os.queueEvent('redionet:sync')
         end
+        os.queueEvent('redionet:sync')
 
         chat.log_message(('Audio sync. Listening: %d/%d'):format(M.state.num_active, M.state.n_receivers), "INFO")
 
@@ -312,13 +325,24 @@ local function transmit_audio(data_buffer)
     -- PROTO_AUDIO_HALT makes all clients not request_next_chunk, thus #rep_ids=0. Only warn if server has active song. 
     -- Noteably, audio.stop_song broadcasts halt. stop_song is also called when a song is skipped, or play now clicked.
     if #reply.ids == 0 and STATE.active_stream_id ~= nil then
+        if M.state.need_sync then
+            chat.log_message('No chunk acks — scheduling resync', 'WARN')
+            os.queueEvent('redionet:sync')
+            os.queueEvent("redionet:request_next_chunk")
+            return
+        end
         chat.log_message('No remaining listeners... Stopping', 'WARN')
         return M.stop_song()
     end
 
     if #reply.times > 1 then
         local desync_ms = (math.max(table.unpack(reply.times)) - math.min(table.unpack(reply.times)))--/Gms
-        chat.log_message(string.format('max client desync: %dms | n=%d/%d', desync_ms, #reply.times, play_state.n_receivers), "DEBUG")
+        chat.log_message(string.format('max client desync: %dms | n=%d/%d', desync_ms, #reply.times, play_state.n_receivers), "INFO")
+
+        if desync_ms > 1000 then
+            chat.log_message('Detected client desync. Forcing sync..', "WARN")
+            os.queueEvent('redionet:sync')
+        end
     end
 
 
