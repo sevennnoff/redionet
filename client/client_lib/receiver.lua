@@ -7,8 +7,6 @@ local speaker = peripheral.find("speaker")
 local REDIONET_VERSION = require("lib.version")
 
 local dbgmon = function (message) end
-local MAX_PENDING_CHUNKS = 2
-local pending_chunks = {}
 
 local function debug_init()
     settings.load()
@@ -37,7 +35,6 @@ end
 local M = {}
 
 function M.reset_stream()
-    pending_chunks = {}
     if speaker then speaker.stop() end
 end
 
@@ -116,9 +113,7 @@ function M.toggle_play_local()
 end
 
 local function play_audio(buffer, state)
-    if not buffer or CSTATE.is_paused or state.active_stream_id ~= state.song_id then
-        return false
-    end
+    if not buffer or CSTATE.is_paused or state.active_stream_id ~= state.song_id then return end
 
     if state.volume then
         CSTATE.server_state.volume = state.volume
@@ -139,9 +134,8 @@ local function play_audio(buffer, state)
                 state.active_stream_id = "HALT"
             end
         )
-        if CSTATE.is_paused or state.active_stream_id ~= state.song_id then return false end
+        if CSTATE.is_paused or state.active_stream_id ~= state.song_id then return end
     end
-    return true
 end
 
 function M.receive_loop()
@@ -163,34 +157,14 @@ function M.receive_loop()
         parallel.waitForAny(
             function ()
                 while true do
-                    while #pending_chunks >= MAX_PENDING_CHUNKS do
-                        os.pullEvent("redionet:chunk_played")
-                    end
-
                     local id, message = rednet.receive(REDIONET_PROTO.AUDIO)
 
                     if CSTATE.is_paused then
                         rednet.send(id, "playback_stopped", REDIONET_PROTO.AUDIO_NEXT)
                     else
-                        table.insert(pending_chunks, message)
-                        os.queueEvent("redionet:chunk_pending")
-                        rednet.send(id, "request_next_chunk", REDIONET_PROTO.AUDIO_NEXT)
-                    end
-                end
-            end,
-
-            function ()
-                while true do
-                    if #pending_chunks == 0 then
-                        os.pullEvent("redionet:chunk_pending")
-                    end
-
-                    local message = table.remove(pending_chunks, 1)
-                    os.queueEvent("redionet:chunk_played")
-
-                    if not CSTATE.is_paused then
                         local buffer, sub_state = table.unpack(message)
                         play_audio(buffer, sub_state)
+                        rednet.send(id, (not CSTATE.is_paused) and "request_next_chunk" or "playback_stopped", REDIONET_PROTO.AUDIO_NEXT)
                     end
                 end
             end,
@@ -198,10 +172,8 @@ function M.receive_loop()
             function ()
                 while true do
                     local id, message = rednet.receive(REDIONET_PROTO.AUDIO_HALT)
-                    pending_chunks = {}
                     speaker.stop()
                     os.queueEvent("redionet:playback_stopped")
-                    os.queueEvent("redionet:chunk_played")
                     rednet.send(id, "playback_interrupted", REDIONET_PROTO.AUDIO_NEXT)
                 end
             end,
@@ -210,14 +182,6 @@ function M.receive_loop()
                 while true do
                     local sid, _ = rednet.receive(REDIONET_PROTO.AUDIO_STATUS)
                     rednet.send(sid, {CSTATE.is_paused and 0 or 1, REDIONET_VERSION}, REDIONET_PROTO.AUDIO_CONNECTION)
-                end
-            end,
-
-            function ()
-                while true do
-                    os.pullEvent("redionet:playback_stopped")
-                    pending_chunks = {}
-                    os.queueEvent("redionet:chunk_played")
                 end
             end
         )
