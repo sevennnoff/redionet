@@ -92,6 +92,10 @@ local function send_audio_connection(status)
     rednet.send(SERVER_ID, {status, REDIONET_VERSION}, REDIONET_PROTO.AUDIO_CONNECTION)
 end
 
+local function send_chunk_ack(server_id, chunk_id, kind)
+    rednet.send(server_id, {chunk_id, kind}, REDIONET_PROTO.AUDIO_NEXT)
+end
+
 function M.send_server_sync()
     if not can_control() then return false end
     return M.send_server_player("SYNC")
@@ -160,11 +164,13 @@ function M.receive_loop()
                     local id, message = rednet.receive(REDIONET_PROTO.AUDIO)
 
                     if CSTATE.is_paused then
-                        rednet.send(id, "playback_stopped", REDIONET_PROTO.AUDIO_NEXT)
+                        local _, sub_state = table.unpack(message)
+                        send_chunk_ack(id, sub_state.chunk_id, "playback_stopped")
                     else
                         local buffer, sub_state = table.unpack(message)
                         play_audio(buffer, sub_state)
-                        rednet.send(id, (not CSTATE.is_paused) and "request_next_chunk" or "playback_stopped", REDIONET_PROTO.AUDIO_NEXT)
+                        send_chunk_ack(id, sub_state.chunk_id,
+                            (not CSTATE.is_paused) and "request_next_chunk" or "playback_stopped")
                     end
                 end
             end,

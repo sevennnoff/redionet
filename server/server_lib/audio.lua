@@ -171,6 +171,30 @@ local function wait_speakers(max_wait, eps)
 end
 
 
+local function parse_ack_payload(msg, expected_chunk_id)
+    local ack_kind, ack_chunk_id
+    if type(msg) == "table" then
+        ack_chunk_id, ack_kind = msg[1], msg[2]
+    else
+        ack_kind = msg
+        ack_chunk_id = nil
+    end
+
+    if ack_kind == "request_next_chunk" then
+        if ack_chunk_id and ack_chunk_id ~= expected_chunk_id then
+            return nil
+        end
+        return "request_next_chunk"
+    end
+    if ack_kind == "playback_stopped" then
+        return "playback_stopped"
+    end
+    if ack_kind == "playback_interrupted" then
+        return "playback_interrupted"
+    end
+    return nil
+end
+
 --  broadcasts the decoded audio buffer data over the audio protocol
 local function transmit_audio(data_buffer)
      -- NOTE: logging via os.queueEvent("redionet:log_message") saturates event queue, keep sync
@@ -189,9 +213,6 @@ local function transmit_audio(data_buffer)
         audio_position_sec = previous.audio_position_sec,
         volume = STATE.data.volume,
     }
-    previous.audio_position_sec = previous.audio_position_sec + audio_dur_sec
-    STATE.data.audio_position_sec = sub_state.audio_position_sec
-    STATE.audio_position_epoch_ms = os.epoch("local")
 
     if M.state.n_receivers == 0 then
         chat.log_message('No visible client connections... Stopping', 'WARN')
@@ -200,7 +221,7 @@ local function transmit_audio(data_buffer)
     
 
     local reply = {ids = {}, times = {}}
-    
+
     local play_state = {
         receiver_stats = {},
         n_receivers = 0,
@@ -208,10 +229,36 @@ local function transmit_audio(data_buffer)
     }
 
     local time_audio_sent
+    local ok, err
 
-    
+    if M.state.need_sync then
+        local sync_wait = TICK
 
-    local function timed_play_task()
+        if sub_state.chunk_id == 1 then
+            sync_wait = 2*sync_wait
+            os.queueEvent('redionet:sync')
+        end
+        -- no mid-track CLIENT_SYNC — stops all speakers and causes doubling
+
+        chat.log_message(('Audio sync. Listening: %d/%d'):format(M.state.num_active, M.state.n_receivers), "INFO")
+
+        local sync_timer,tid = os.startTimer(sync_wait), nil
+        repeat _,tid = os.pullEvent('timer') until tid == sync_timer
+        os.cancelTimer(sync_timer)
+
+        M.state.need_sync = false
+    end
+
+    for attempt = 1, 3 do
+        reply = {ids = {}, times = {}}
+        play_state = {
+            receiver_stats = {},
+            n_receivers = 0,
+            num_active = 0,
+        }
+        time_audio_sent = nil
+
+        local function timed_play_task()
         local istate = {
             n_receivers = M.state.n_receivers,
             num_active = M.state.num_active,
@@ -241,7 +288,8 @@ local function transmit_audio(data_buffer)
             function ()
                 repeat
                     local id, msg = rednet.receive(REDIONET_PROTO.AUDIO_NEXT)
-                    if not timer then
+                    local ack_kind = parse_ack_payload(msg, sub_state.chunk_id)
+                    if ack_kind and not timer then
                         local first_responce_sec = (os.epoch('local') - time_audio_sent )/1000
                         if fallback_timer then os.cancelTimer(fallback_timer) end
                         timer = os.startTimer(timeout)
@@ -250,7 +298,7 @@ local function transmit_audio(data_buffer)
 
                     if play_state.receiver_stats[id] ~= nil then
                         -- duplicate ack
-                    elseif msg == "request_next_chunk" then
+                    elseif ack_kind == "request_next_chunk" then
                         play_state.n_receivers = play_state.n_receivers + 1
                         local timestamp_ms = os.epoch("local")
                         play_state.receiver_stats[id] = 1
@@ -262,10 +310,10 @@ local function transmit_audio(data_buffer)
                             ("%0.3f"):format(timestamp_ms/1000):sub(-8), play_duration,
                             play_state.num_active, play_state.n_receivers ), "DEBUG")
                         previous.req_chunk_times[id] = timestamp_ms
-                    elseif msg == "playback_stopped" then
+                    elseif ack_kind == "playback_stopped" then
                         play_state.n_receivers = play_state.n_receivers + 1
                         play_state.receiver_stats[id] = -1
-                    elseif msg == "playback_interrupted" then
+                    elseif ack_kind == "playback_interrupted" then
                         break
                     end
                 until all_receivers_replied()
@@ -283,7 +331,8 @@ local function transmit_audio(data_buffer)
                     local n_expected = 0
                     for _ in pairs(istate.receiver_stats) do n_expected = n_expected + 1 end
                     if #slow_ids >= n_expected then
-                        chat.log_message('All clients missed chunk ack — continuing without halt', 'WARN')
+                        chat.log_message(('All clients missed chunk #%d ack (attempt %d/3)'):format(
+                            sub_state.chunk_id, attempt), 'WARN')
                     else
                         for _, client in ipairs(slow_ids) do
                             rednet.send(client.id, "audio.stop_song", REDIONET_PROTO.AUDIO_HALT)
@@ -299,35 +348,24 @@ local function transmit_audio(data_buffer)
 
         if timer then os.cancelTimer(timer) end
         if fallback_timer then os.cancelTimer(fallback_timer) end
-    end
-
-    -- print(textutils.serialize(M.state, {compact = true, allow_repetitions = true}))
-    if M.state.need_sync then
-        local sync_wait = TICK
-
-        if sub_state.chunk_id == 1 then
-            sync_wait = 2*sync_wait
-            os.queueEvent('redionet:sync')
         end
-        -- no mid-track CLIENT_SYNC — stops all speakers and causes doubling
 
-        chat.log_message(('Audio sync. Listening: %d/%d'):format(M.state.num_active, M.state.n_receivers), "INFO")
-
-        local sync_timer,tid = os.startTimer(sync_wait), nil
-        repeat _,tid = os.pullEvent('timer') until tid == sync_timer
-        os.cancelTimer(sync_timer)
-
-        M.state.need_sync = false
+        ok, err = pcall(parallel.waitForAll, timed_play_task, function () if not M.state.prefill_end then data_buffer:read_n(2) end end)
+        if not ok then break end
+        if #reply.ids > 0 then break end
+        if attempt < 3 then
+            chat.log_message(('Retrying chunk #%d broadcast'):format(sub_state.chunk_id), 'WARN')
+        end
     end
 
-    local ok, err = pcall(parallel.waitForAll, timed_play_task, function () if not M.state.prefill_end then data_buffer:read_n(2) end end)
-
-    -- PROTO_AUDIO_HALT makes all clients not request_next_chunk, thus #rep_ids=0. Only warn if server has active song. 
-    -- Noteably, audio.stop_song broadcasts halt. stop_song is also called when a song is skipped, or play now clicked.
     if #reply.ids == 0 and STATE.active_stream_id ~= nil then
         chat.log_message('No remaining listeners... Stopping', 'WARN')
         return M.stop_song()
     end
+
+    previous.audio_position_sec = previous.audio_position_sec + audio_dur_sec
+    STATE.data.audio_position_sec = sub_state.audio_position_sec
+    STATE.audio_position_epoch_ms = os.epoch("local")
 
     if #reply.times > 1 then
         local desync_ms = (math.max(table.unpack(reply.times)) - math.min(table.unpack(reply.times)))--/Gms
