@@ -26,13 +26,13 @@ REDIONET_PROTO = {
     AUDIO_NEXT = 'RDN:AUDIO_NEXT:v5',
     AUDIO_HALT = 'RDN:AUDIO_HALT:v5',
     AUDIO_STATUS = 'RDN:AUDIO_STATUS:v5',
+    AUDIO_TIMELINE = 'RDN:AUDIO_TIMELINE:v5',
     CLIENT_SYNC = 'RDN:CLIENT_SYNC:v5',
     COMMAND = 'RDN:COMMAND:v5',
 }
 
 local ui = require("client_lib.ui")
 local receiver = require("client_lib.receiver")
-local bass_boost = require("client_lib.bass_boost")
 local net = require('client_lib.net')
 
 
@@ -80,6 +80,9 @@ local function write_line(y, label, value, color)
 end
 
 local function current_display_position_sec()
+    if CSTATE.server_state.status == 1 and CSTATE.server_state.timeline_origin_ms then
+        return math.max(0, (receiver.server_now_ms() - CSTATE.server_state.timeline_origin_ms) / 1000)
+    end
     local pos = CSTATE.server_state.audio_position_sec or 0
     if CSTATE.server_state.status == 1 and CSTATE.state_received_epoch_ms then
         pos = pos + (os.epoch("local") - CSTATE.state_received_epoch_ms) / 1000
@@ -91,6 +94,7 @@ local function apply_server_state(server_state)
     CSTATE.server_state = server_state
     CSTATE.state_received_epoch_ms = os.epoch("local")
     CSTATE.is_authorized = server_state.controller_id == CLIENT_ID
+    receiver.sync_clock(server_state.server_time_ms)
 end
 
 local function draw_player_status()
@@ -273,9 +277,7 @@ local function client_loop()
             function ()
                 rednet.receive(REDIONET_PROTO.CLIENT_SYNC)
                 if speaker then
-                    bass_boost.clear()
-                    speaker.stop()
-                    os.queueEvent("redionet:playback_stopped")
+                    os.queueEvent("redionet:timeline_flush")
                 end
             end,
 

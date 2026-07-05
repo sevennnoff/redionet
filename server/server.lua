@@ -20,6 +20,7 @@ REDIONET_PROTO = {
     AUDIO_NEXT = 'RDN:AUDIO_NEXT:v5',
     AUDIO_HALT = 'RDN:AUDIO_HALT:v5',
     AUDIO_STATUS = 'RDN:AUDIO_STATUS:v5',
+    AUDIO_TIMELINE = 'RDN:AUDIO_TIMELINE:v5',
     CLIENT_SYNC = 'RDN:CLIENT_SYNC:v5',
     COMMAND = 'RDN:COMMAND:v5',
     CHATBOX = 'RDN:CHATBOX:v5',
@@ -271,7 +272,6 @@ local function server_loop()
                         os.queueEvent('redionet:broadcast_state', "SERVER_PLAYER: BASS")
                     elseif code == "SYNC" then
                         audio.state.need_sync = true
-                        audio.state.speaker_cache = 0
                         os.queueEvent('redionet:sync')
                         os.queueEvent('redionet:broadcast_state', "SERVER_PLAYER: SYNC")
                     end
@@ -314,7 +314,6 @@ local function server_event_loop()
                     chat.show_help()
                 elseif cmd == 'sync' then
                     audio.state.need_sync = true
-                    audio.state.speaker_cache = 0
                     os.queueEvent('redionet:sync')
                 elseif cmd == 'killlegacy' then
                     os.queueEvent('redionet:killlegacy')
@@ -326,7 +325,6 @@ local function server_event_loop()
 
             function()
                 os.pullEvent('redionet:sync')
-                audio.state.speaker_cache = 0
                 rednet.broadcast('sync', REDIONET_PROTO.CLIENT_SYNC)
             end,
 
