@@ -227,9 +227,6 @@ local function format_time(seconds)
 end
 
 local function current_display_position_sec()
-    if CSTATE.server_state.status == 1 and CSTATE.server_state.timeline_origin_ms then
-        return math.max(0, (receiver.server_now_ms() - CSTATE.server_state.timeline_origin_ms) / 1000)
-    end
     local pos = CSTATE.server_state.audio_position_sec or 0
     if CSTATE.server_state.status == 1 and CSTATE.state_received_epoch_ms then
         pos = pos + (os.epoch("local") - CSTATE.state_received_epoch_ms) / 1000

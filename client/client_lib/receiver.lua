@@ -1,29 +1,15 @@
 --[[
     Receiver module
-    Timeline playback: buffer pushed chunks, play at server play_at_ms.
+    Barrier sync: decode DFPWM wire from server, playAudio, ack.
 ]]
+
+local dfpwm = require("cc.audio.dfpwm")
 
 local speaker = peripheral.find("speaker")
 
 local dbgmon = function() end
-local WAIT_TICK = 0.05
-local LATE_GRACE_MS = 80
-
-local timeline = nil
-local pending = {}
-local next_play_id = 1
-local clock_offset_ms = 0
-local play_timer = nil
-
-local function server_now_ms()
-    return os.epoch("local") + clock_offset_ms
-end
-
-local function sync_clock(server_time_ms)
-    if server_time_ms then
-        clock_offset_ms = server_time_ms - os.epoch("local")
-    end
-end
+local stream_decoder = dfpwm.make_decoder()
+local stream_id = nil
 
 local function debug_init()
     settings.load()
@@ -47,23 +33,27 @@ local function debug_init()
     end
 end
 
+local function reset_decoder(new_stream_id)
+    if new_stream_id ~= stream_id then
+        stream_decoder = dfpwm.make_decoder()
+        stream_id = new_stream_id
+    end
+end
+
+local function pcm_from_payload(payload, sub_state)
+    if type(payload) == "string" or sub_state.format == "dfpwm" then
+        reset_decoder(sub_state.active_stream_id)
+        return stream_decoder(payload)
+    end
+    return payload
+end
+
 local M = {}
 
-function M.server_now_ms()
-    return server_now_ms()
-end
-
-function M.sync_clock(server_time_ms)
-    sync_clock(server_time_ms)
-end
-
-function M.on_timeline_flush()
-    if not timeline then return end
-    speaker.stop()
-    pending = {}
-    local pos_ms = server_now_ms() - timeline.origin_ms
-    next_play_id = math.max(timeline.start_chunk_id or 1, math.floor(pos_ms / timeline.chunk_ms) + 1)
-    os.queueEvent("redionet:advance_playback")
+function M.reset_stream()
+    stream_decoder = dfpwm.make_decoder()
+    stream_id = nil
+    if speaker then speaker.stop() end
 end
 
 function M.update_server_state(blocking)
@@ -73,7 +63,6 @@ function M.update_server_state(blocking)
         CSTATE.server_state = server_state
         CSTATE.is_authorized = server_state.controller_id == CLIENT_ID
         CSTATE.state_received_epoch_ms = os.epoch("local")
-        sync_clock(server_state.server_time_ms)
     else
         os.queueEvent('redionet:sync_state')
     end
@@ -131,86 +120,36 @@ function M.toggle_play_local()
         CSTATE.is_paused = true
         if speaker then
             rednet.send(SERVER_ID, 0, REDIONET_PROTO.AUDIO_CONNECTION)
-            speaker.stop()
-            pending = {}
+            os.queueEvent("redionet:playback_stopped")
+            M.reset_stream()
         end
     end
 end
 
-local function reset_playback()
-    timeline = nil
-    pending = {}
-    next_play_id = 1
-    if play_timer then
-        os.cancelTimer(play_timer)
-        play_timer = nil
+local function play_audio(buffer, state)
+    if not buffer or CSTATE.is_paused or state.active_stream_id ~= state.song_id then return end
+
+    if state.volume then
+        CSTATE.server_state.volume = state.volume
     end
-    if speaker then speaker.stop() end
-end
+    if state.bass_boost ~= nil then
+        CSTATE.server_state.bass_boost = state.bass_boost
+    end
+    local volume = state.volume or CSTATE.server_state.volume or 1.5
+    dbgmon(('- %0.3fs - chunk: %d, vol: %0.2f'):format(
+        state.audio_position_sec, state.chunk_id, volume))
+    os.queueEvent("redionet:audio_timestamp", state.audio_position_sec)
 
-local function apply_timeline(map)
-    reset_playback()
-    sync_clock(map.server_time_ms)
-    timeline = map
-    next_play_id = map.start_chunk_id or 1
-    dbgmon(("timeline origin in %dms, from chunk %d"):format(
-        map.origin_ms - server_now_ms(), next_play_id))
-    os.queueEvent("redionet:advance_playback")
-end
-
-local function schedule_play_timer(delay_sec)
-    if play_timer then os.cancelTimer(play_timer) end
-    play_timer = os.startTimer(math.max(WAIT_TICK, delay_sec or WAIT_TICK))
-end
-
-local function play_pcm(buffer, volume)
     while not speaker.playAudio(buffer, volume) do
+        dbgmon('SPEAKER FULL')
         parallel.waitForAny(
             function() os.pullEvent("speaker_audio_empty") end,
-            function() os.pullEvent("redionet:timeline_flush") end,
-            function() os.pullEvent("redionet:playback_stopped") end
-        )
-        if not timeline or CSTATE.is_paused then return false end
-    end
-    return true
-end
-
-local function advance_playback()
-    if not timeline or not speaker or CSTATE.is_paused then return end
-    if CSTATE.server_state.status ~= 1 then return end
-
-    play_timer = nil
-
-    while true do
-        local entry = pending[next_play_id]
-        if not entry then
-            schedule_play_timer(WAIT_TICK)
-            return
-        end
-
-        local play_at = timeline.origin_ms + (next_play_id - 1) * timeline.chunk_ms
-        local end_at = play_at + timeline.chunk_ms + LATE_GRACE_MS
-        local now = server_now_ms()
-
-        if now > end_at then
-            dbgmon(("skip late chunk %d by %dms"):format(next_play_id, now - end_at))
-            pending[next_play_id] = nil
-            next_play_id = next_play_id + 1
-        elseif now < play_at then
-            schedule_play_timer((play_at - now) / 1000)
-            return
-        else
-            local sub = entry.sub_state
-            if sub.volume then CSTATE.server_state.volume = sub.volume end
-            if sub.bass_boost ~= nil then CSTATE.server_state.bass_boost = sub.bass_boost end
-            local volume = sub.volume or CSTATE.server_state.volume or 1.5
-
-            if play_pcm(entry.buffer, volume) then
-                os.queueEvent("redionet:audio_timestamp", (next_play_id - 1) * timeline.chunk_ms / 1000)
+            function()
+                os.pullEvent("redionet:playback_stopped")
+                state.active_stream_id = "HALT"
             end
-            pending[next_play_id] = nil
-            next_play_id = next_play_id + 1
-        end
+        )
+        if CSTATE.is_paused or state.active_stream_id ~= state.song_id then return end
     end
 end
 
@@ -233,54 +172,25 @@ function M.receive_loop()
         parallel.waitForAny(
             function()
                 while true do
-                    local _, map = rednet.receive(REDIONET_PROTO.AUDIO_TIMELINE)
-                    apply_timeline(map)
-                end
-            end,
+                    local id, message = rednet.receive(REDIONET_PROTO.AUDIO)
 
-            function()
-                while true do
-                    local _, message = rednet.receive(REDIONET_PROTO.AUDIO)
-                    if CSTATE.is_paused or not timeline then
-                        -- drop while paused / no map
+                    if CSTATE.is_paused then
+                        rednet.send(id, "playback_stopped", REDIONET_PROTO.AUDIO_NEXT)
                     else
-                        local buffer, sub_state = table.unpack(message)
-                        if sub_state
-                            and sub_state.active_stream_id == timeline.active_stream_id
-                            and sub_state.chunk_id then
-                            pending[sub_state.chunk_id] = { buffer = buffer, sub_state = sub_state }
-                            os.queueEvent("redionet:advance_playback")
-                        end
+                        local payload, sub_state = table.unpack(message)
+                        local buffer = pcm_from_payload(payload, sub_state)
+                        play_audio(buffer, sub_state)
+                        rednet.send(id, (not CSTATE.is_paused) and "request_next_chunk" or "playback_stopped", REDIONET_PROTO.AUDIO_NEXT)
                     end
                 end
             end,
 
             function()
                 while true do
-                    local ev = os.pullEvent()
-                    if ev == "redionet:advance_playback"
-                        or ev == "redionet:timeline_flush"
-                        or ev == "timer"
-                        or ev == "redionet:sync_state" then
-                        if ev == "redionet:sync_state" and CSTATE.server_state.server_time_ms then
-                            sync_clock(CSTATE.server_state.server_time_ms)
-                        end
-                        if ev == "redionet:timeline_flush" then
-                            M.on_timeline_flush()
-                        else
-                            advance_playback()
-                        end
-                    elseif ev == "redionet:playback_stopped" then
-                        reset_playback()
-                    end
-                end
-            end,
-
-            function()
-                while true do
-                    rednet.receive(REDIONET_PROTO.AUDIO_HALT)
-                    reset_playback()
+                    local id, _ = rednet.receive(REDIONET_PROTO.AUDIO_HALT)
+                    M.reset_stream()
                     os.queueEvent("redionet:playback_stopped")
+                    rednet.send(id, "playback_interrupted", REDIONET_PROTO.AUDIO_NEXT)
                 end
             end,
 

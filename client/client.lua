@@ -80,9 +80,6 @@ local function write_line(y, label, value, color)
 end
 
 local function current_display_position_sec()
-    if CSTATE.server_state.status == 1 and CSTATE.server_state.timeline_origin_ms then
-        return math.max(0, (receiver.server_now_ms() - CSTATE.server_state.timeline_origin_ms) / 1000)
-    end
     local pos = CSTATE.server_state.audio_position_sec or 0
     if CSTATE.server_state.status == 1 and CSTATE.state_received_epoch_ms then
         pos = pos + (os.epoch("local") - CSTATE.state_received_epoch_ms) / 1000
@@ -94,7 +91,6 @@ local function apply_server_state(server_state)
     CSTATE.server_state = server_state
     CSTATE.state_received_epoch_ms = os.epoch("local")
     CSTATE.is_authorized = server_state.controller_id == CLIENT_ID
-    receiver.sync_clock(server_state.server_time_ms)
 end
 
 local function draw_player_status()
@@ -277,7 +273,8 @@ local function client_loop()
             function ()
                 rednet.receive(REDIONET_PROTO.CLIENT_SYNC)
                 if speaker then
-                    os.queueEvent("redionet:timeline_flush")
+                    receiver.reset_stream()
+                    os.queueEvent("redionet:playback_stopped")
                 end
             end,
 
