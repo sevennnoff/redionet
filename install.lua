@@ -13,7 +13,7 @@ local prog_args = { ... }
 
 
 local BASE_URL = "https://raw.githubusercontent.com/sevennnoff/redionet/refs/heads/main/"
-local INSTALL_VERSION = "2026-07-05-speakers-footer"
+local INSTALL_VERSION = "2026-07-05-slowest-barrier"
 
 local filemap = {}
 
