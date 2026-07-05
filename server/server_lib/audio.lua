@@ -7,7 +7,6 @@ local dfpwm = require("cc.audio.dfpwm")
 
 local network = require("server_lib.network")
 local chat = require('server_lib.chat')
-local bass_boost = require("server_lib.bass_boost")
 
 local AUDIO_CHUNK_SEC = 2.70 -- maximum tick multiple under 2.730666.. [(2^7 * 2^10) samples / 48000kHz]
 local TICK = 0.050
@@ -175,15 +174,12 @@ local function transmit_audio(data_buffer)
 
     local audio_dur_sec = (#audio_chunk/48000)
 
-    bass_boost.process(audio_chunk, data_buffer.song_id, STATE.data.bass_boost)
-
     local sub_state = {
         active_stream_id = STATE.active_stream_id, -- this is the only place we give clients access to active_stream_id
         song_id = data_buffer.song_id, -- add in local song_id for interrupts
         chunk_id = data_buffer.total_write.chunks,
         audio_position_sec = previous.audio_position_sec,
         volume = STATE.data.volume,
-        bass_boost = STATE.data.bass_boost,
     }
     previous.audio_position_sec = previous.audio_position_sec + audio_dur_sec
     STATE.data.audio_position_sec = sub_state.audio_position_sec
@@ -292,9 +288,9 @@ local function transmit_audio(data_buffer)
 
         if sub_state.chunk_id == 1 then
             sync_wait = 2*sync_wait -- 2 tick on start
-        else
-            os.queueEvent('redionet:sync') -- stops speakers and sets audio.state.speaker_cache = 0
+            os.queueEvent('redionet:sync')
         end
+        -- no mid-track CLIENT_SYNC on rejoin — it stops all speakers and causes doubling
 
         chat.log_message(('Audio sync. Listening: %d/%d'):format(M.state.num_active, M.state.n_receivers), "INFO")
 
@@ -361,7 +357,6 @@ local function process_audio_data(data_buffer)
     M.state.speaker_cache = 0
     M.state.need_sync = true -- always sync on new song
     M.state.prefill_end = true
-    bass_boost.clear()
 
     previous = {
         req_chunk_times = {},
@@ -437,7 +432,6 @@ function M.play_song(song_meta)
 end
 
 function M.stop_song()
-    bass_boost.clear()
     rednet.broadcast("audio.stop_song", REDIONET_PROTO.AUDIO_HALT)
     os.queueEvent("redionet:playback_stopped") -- pulled by process_audio_data
     STATE.active_stream_id = nil

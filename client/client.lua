@@ -273,7 +273,7 @@ local function client_loop()
             function ()
                 rednet.receive(REDIONET_PROTO.CLIENT_SYNC)
                 if speaker then
-                    receiver.reset_stream()
+                    speaker.stop()
                     os.queueEvent("redionet:playback_stopped")
                 end
             end,
