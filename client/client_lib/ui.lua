@@ -376,21 +376,35 @@ local function draw_now_playing_tab()
     end
 
     if CSTATE.is_controller then
-        local info = CSTATE.server_state.listeners
-        local y = config.term_height
-        term.setCursorPos(config.ui.xpos, y)
+        local footer_y = config.term_height
+        term.setCursorPos(config.ui.xpos, footer_y)
         term.clearLine()
         term.setTextColor(colors.lightGray)
-        if info and info.clients and #info.clients > 0 then
-            local ids = {}
-            for _, c in ipairs(info.clients) do
-                table.insert(ids, ("#%d%s"):format(c.id, c.active and "" or "°"))
+
+        local info = CSTATE.server_state.listeners
+        local active, total = 0, 0
+        local parts = {}
+        if type(info) == "table" then
+            active = tonumber(info.active) or 0
+            total = tonumber(info.total) or 0
+            if type(info.clients) == "table" then
+                for _, client in ipairs(info.clients) do
+                    if type(client) == "table" and client.id then
+                        table.insert(parts, ("#%d%s"):format(client.id, client.active and "" or "o"))
+                    end
+                end
             end
-            local line = ("Speakers %d/%d: "):format(info.active or 0, info.total or 0) .. table.concat(ids, " ")
-            term.write(truncate(line, config.term_width - config.ui.xpad))
-        else
-            term.write("Speakers 0/0")
         end
+
+        local line = ("Speakers %d/%d"):format(active, total)
+        if #parts > 0 then
+            line = line .. ": " .. table.concat(parts, " ")
+        end
+        local maxLen = math.max(1, config.term_width - config.ui.xpad)
+        if #line > maxLen then
+            line = string.sub(line, 1, maxLen - 3) .. "..."
+        end
+        term.write(line)
     end
 end
 
