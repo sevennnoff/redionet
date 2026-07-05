@@ -183,6 +183,14 @@ local function clamp03(value)
     return math.max(0, math.min(3, tonumber(value) or 0))
 end
 
+local function truncate(text, maxLen)
+    text = tostring(text or "")
+    maxLen = math.floor(maxLen or #text)
+    if #text <= maxLen then return text end
+    if maxLen <= 3 then return string.sub(text, 1, maxLen) end
+    return string.sub(text, 1, maxLen - 3) .. "..."
+end
+
 local function draw_level_slider(slider_cfg, level, label)
     local label_w = 4
     local bar_x = slider_cfg.x + label_w
