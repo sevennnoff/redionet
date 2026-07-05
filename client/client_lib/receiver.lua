@@ -81,6 +81,10 @@ function M.send_server_volume(volume)
     return M.send_server_player("VOLUME", volume)
 end
 
+function M.send_server_bass(bass)
+    return M.send_server_player("BASS", bass)
+end
+
 function M.send_server_sync()
     if not can_control() then return false end
     return M.send_server_player("SYNC")
@@ -107,12 +111,17 @@ local function play_audio(buffer, state)
     if state.volume then
         CSTATE.server_state.volume = state.volume
     end
+    if state.bass_boost ~= nil then
+        CSTATE.server_state.bass_boost = state.bass_boost
+    end
     local volume = state.volume or CSTATE.server_state.volume or 1.5
-    dbgmon(('- %0.3fs - chunk: %d, song: %s, vol: %0.2f bass: %s'):format(
-        state.audio_position_sec, state.chunk_id, state.song_id, volume, bass_boost.format_pct()))
+    local bass = state.bass_boost
+    if bass == nil then bass = CSTATE.server_state.bass_boost or 0 end
+    dbgmon(('- %0.3fs - chunk: %d, vol: %0.2f bass: %0.1f'):format(
+        state.audio_position_sec, state.chunk_id, volume, bass))
     os.queueEvent("redionet:audio_timestamp", state.audio_position_sec)
 
-    bass_boost.process(buffer, state.song_id)
+    bass_boost.process(buffer, state.song_id, bass)
 
     while not speaker.playAudio(buffer, volume) do
         dbgmon('SPEAKER FULL')

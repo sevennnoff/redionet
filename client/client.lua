@@ -52,6 +52,7 @@ CSTATE = {
         is_loading = false,
         loop_mode = 0,
         volume = 1.5,
+        bass_boost = 0,
         controller_id = nil,
         status = -1,
         error_status = false,
@@ -115,7 +116,7 @@ local function draw_player_status()
     local status_color = status == 1 and colors.lime or status == 0 and colors.red or colors.lightGray
     write_line(8, "Server: ", status_text, status_color)
     write_line(9, "Volume: ", ("%d%%"):format(math.floor(100 * ((CSTATE.server_state.volume or 0) / 3) + 0.5)))
-    write_line(10, "Bass: ", bass_boost.format_pct())
+    write_line(10, "Bass: ", ("%d%%"):format(math.floor(100 * ((CSTATE.server_state.bass_boost or 0) / 3) + 0.5)))
 
     local song = CSTATE.server_state.active_song_meta
     if song then
@@ -275,25 +276,6 @@ local function client_loop()
                     bass_boost.clear()
                     speaker.stop()
                     os.queueEvent("redionet:playback_stopped")
-                end
-            end,
-
-            function ()
-                if IS_CONTROLLER then
-                    while true do os.pullEvent("redionet:player_status_tick") end
-                end
-
-                while true do
-                    local ev, p1 = os.pullEvent()
-                    if ev == "char" then
-                        if p1 == "+" then
-                            bass_boost.adjust(bass_boost.BASS_STEP)
-                            draw_player_status()
-                        elseif p1 == "_" then
-                            bass_boost.adjust(-bass_boost.BASS_STEP)
-                            draw_player_status()
-                        end
-                    end
                 end
             end,
 

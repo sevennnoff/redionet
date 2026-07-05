@@ -64,6 +64,7 @@ STATE = {
         server_time_ms = nil, -- server os.epoch(local) at last state build for clock sync
         loop_mode = 0,          -- 0: Off, 1: Queue/List, 2: Song
         volume = 1.5,           -- server-wide volume, value between 0 and 3
+        bass_boost = 0,         -- server-wide bass 0..3 (ccmusic-style)
         controller_id = nil,    -- client id that entered the control password
 
         -- Network Status Info
@@ -132,6 +133,7 @@ local function restore_state(filename)
         STATE.data.audio_position_sec = 0
         STATE.data.loop_mode        = state_data.loop_mode
         STATE.data.volume           = state_data.volume or STATE.data.volume
+        STATE.data.bass_boost       = state_data.bass_boost or STATE.data.bass_boost
         -- network status info ignored, irrelevant after reset
 
         pcall(function() fs.delete(filename) end) -- allow fail without compromising restore
@@ -264,6 +266,9 @@ local function server_loop()
                     elseif code == "VOLUME" then
                         STATE.data.volume = math.max(0, math.min(3, tonumber(payload) or STATE.data.volume))
                         os.queueEvent('redionet:broadcast_state', "SERVER_PLAYER: VOLUME")
+                    elseif code == "BASS" then
+                        STATE.data.bass_boost = math.max(0, math.min(3, tonumber(payload) or STATE.data.bass_boost))
+                        os.queueEvent('redionet:broadcast_state', "SERVER_PLAYER: BASS")
                     elseif code == "SYNC" then
                         audio.state.need_sync = true
                         audio.state.speaker_cache = 0

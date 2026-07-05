@@ -13,7 +13,7 @@ local prog_args = { ... }
 
 
 local BASE_URL = "https://raw.githubusercontent.com/sevennnoff/redionet/refs/heads/main/"
-local INSTALL_VERSION = "2026-07-05-slave-bass"
+local INSTALL_VERSION = "2026-07-05-remote-bass-sync"
 
 local filemap = {}
 
@@ -53,11 +53,6 @@ local function load_settings(verbose)
     settings.define("redionet.log_level", {
         description = "Minimum severity to show in server console. 1=DEBUG, 2=INFO, 3=WARN, 4=ERROR. (default=3)",
         default = 3,
-        type = "number",
-    })
-    settings.define("redionet.bass_boost", {
-        description = "Speaker client bass boost 0-300% (ccmusic-style, local only). Use +/- on slave UI.",
-        default = 0,
         type = "number",
     })
     -- *very* important to load before calling settings.save

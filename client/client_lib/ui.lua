@@ -56,7 +56,8 @@ config.ui = {
     skip_button =   { x = xpos + 8,  y = 6, width = 6, label = " Skip " }, -- +1 extra gap 
     loop_button =   { x = xpos + 15, y = 6, width = 10, labels = { " Loop Off ", " Loop All ", " Loop One " } },
     volume_slider = { x = xpos,      y = 8, width = 25 },
-    queue = { start_y = 10, height = 2 },
+    bass_slider =   { x = xpos,      y = 9, width = 25 },
+    queue = { start_y = 11, height = 2 },
 
     -- Search Tab
     search_bar = { x = xpos, y = 3, width = config.term_width - 2*xpad, height = 3 },
@@ -96,6 +97,7 @@ M.state.in_search_result_view = false
 M.state.clicked_result_index = nil
 M.state.loop_mode = 0 -- Local only
 M.state.ui_enabled = false -- server control enabled after password auth
+M.state.ctrl_held = false
 
 M.state.now_playing_song_id = nil
 M.state.now_playing_artist_line = nil
@@ -175,6 +177,54 @@ local function draw_tabs_bar()
     term.setTextColor(config.colors.server_btn_text)
     term.setCursorPos(btn_cfg.x, btn_cfg.y)
     term.write(status_label)
+end
+
+local function clamp03(value)
+    return math.max(0, math.min(3, tonumber(value) or 0))
+end
+
+local function draw_level_slider(slider_cfg, level, label)
+    local label_w = 4
+    local bar_x = slider_cfg.x + label_w
+    local bar_w = slider_cfg.width - label_w
+    term.setCursorPos(slider_cfg.x, slider_cfg.y)
+    term.setTextColor(config.colors.text_secondary)
+    term.write(("%-" .. label_w .. "s"):format(label))
+    paintutils.drawBox(bar_x, slider_cfg.y, bar_x + bar_w - 1, slider_cfg.y, config.colors.volume_slider)
+    local handle_width = math.floor((bar_w - 1) * (level / 3) + 0.5)
+    if handle_width > 0 then
+        paintutils.drawBox(bar_x, slider_cfg.y, bar_x + handle_width, slider_cfg.y, config.colors.volume_slider_active)
+    end
+    local percent_str = math.floor(100 * (level / 3) + 0.5) .. "%"
+    if handle_width > #percent_str + 2 then
+        set_colors(config.colors.text_active, config.colors.volume_slider_active)
+        term.setCursorPos(bar_x + handle_width - #percent_str - 1, slider_cfg.y)
+    else
+        set_colors(config.colors.text, config.colors.volume_slider)
+        term.setCursorPos(bar_x + handle_width + 1, slider_cfg.y)
+    end
+    term.write(percent_str)
+end
+
+local function adjust_volume(delta)
+    request_auth(function()
+        receiver.send_server_volume(clamp03((CSTATE.server_state.volume or 1.5) + delta))
+        M.redraw_screen()
+    end)
+end
+
+local function adjust_bass(delta)
+    request_auth(function()
+        receiver.send_server_bass(clamp03((CSTATE.server_state.bass_boost or 0) + delta))
+        M.redraw_screen()
+    end)
+end
+
+local function slider_level_from_x(slider_cfg, x)
+    local label_w = 4
+    local bar_x = slider_cfg.x + label_w
+    local bar_w = slider_cfg.width - label_w
+    return clamp03((x - bar_x) / (bar_w - 1) * 3)
 end
 
 local function format_time(seconds)
@@ -305,23 +355,9 @@ local function draw_now_playing_tab()
     term.setCursorPos(btn_cfg.x, btn_cfg.y)
     term.write(btn_cfg.labels[M.state.loop_mode + 1])
 
-    -- Volume slider
-    local vol_cfg = config.ui.volume_slider
-    paintutils.drawBox(vol_cfg.x, vol_cfg.y, vol_cfg.x + vol_cfg.width - 1, vol_cfg.y, config.colors.volume_slider)
-    local volume = CSTATE.server_state.volume or 1.5
-    local handle_width = math.floor((vol_cfg.width - 1) * (volume / 3) + 0.5)
-    if handle_width > 0 then
-        paintutils.drawBox(vol_cfg.x, vol_cfg.y, vol_cfg.x + handle_width - 0, vol_cfg.y, config.colors.volume_slider_active)
-    end
-    local percent_str = math.floor(100 * (volume / 3) + 0.5) .. "%"
-    if handle_width > #percent_str + 2 then
-        set_colors(config.colors.text_active, config.colors.volume_slider_active)
-        term.setCursorPos(vol_cfg.x + handle_width - #percent_str - 1, vol_cfg.y)
-    else
-        set_colors(config.colors.text, config.colors.volume_slider)
-        term.setCursorPos(vol_cfg.x + handle_width + 1, vol_cfg.y)
-    end
-    term.write(percent_str)
+    -- Volume + bass sliders (server-wide)
+    draw_level_slider(config.ui.volume_slider, CSTATE.server_state.volume or 1.5, "Vol")
+    draw_level_slider(config.ui.bass_slider, CSTATE.server_state.bass_boost or 0, "Bas")
 
     
     -- Queue
@@ -673,8 +709,11 @@ local function handle_click(button, x, y)
             end
         elseif y == config.ui.volume_slider.y then
             if is_in_box(x, y, config.ui.volume_slider) then
-                local volume = (x - config.ui.volume_slider.x) / (config.ui.volume_slider.width - 1) * 3
-                request_auth(function() receiver.send_server_volume(volume) end)
+                request_auth(function() receiver.send_server_volume(slider_level_from_x(config.ui.volume_slider, x)) end)
+            end
+        elseif y == config.ui.bass_slider.y then
+            if is_in_box(x, y, config.ui.bass_slider) then
+                request_auth(function() receiver.send_server_bass(slider_level_from_x(config.ui.bass_slider, x)) end)
             end
         end
         
@@ -707,22 +746,35 @@ end
 
 local function handle_drag(button, x, y)
     if button > 1 then return end
-    if M.state.active_tab == 1 and y == config.ui.volume_slider.y and is_in_box(x, y, config.ui.volume_slider) then
-        if not CSTATE.is_authorized then return end
-        local volume = (x - config.ui.volume_slider.x) / (config.ui.volume_slider.width - 1) * 3
-        receiver.send_server_volume(volume)
+    if M.state.active_tab ~= 1 or not CSTATE.is_authorized then return end
+    if y == config.ui.volume_slider.y and is_in_box(x, y, config.ui.volume_slider) then
+        receiver.send_server_volume(slider_level_from_x(config.ui.volume_slider, x))
+        M.redraw_screen()
+    elseif y == config.ui.bass_slider.y and is_in_box(x, y, config.ui.bass_slider) then
+        receiver.send_server_bass(slider_level_from_x(config.ui.bass_slider, x))
         M.redraw_screen()
     end
 end
 
 local function handle_key_press(key, is_held)
     local key_name = keys.getName(key)
-    if M.state.active_tab == 1 then -- Now Playing Tab Hotkeys
-        if key_name == "right" then
+    if key_name == "leftCtrl" or key_name == "rightCtrl" then
+        M.state.ctrl_held = true
+        return
+    end
+
+    if M.state.active_tab == 1 then
+        if key_name == "equals" or key_name == "plus" or key_name == "numpadAdd" then
+            if M.state.ctrl_held then adjust_bass(0.1) else adjust_volume(0.1) end
+            return
+        elseif key_name == "minus" or key_name == "numpadSubtract" then
+            if M.state.ctrl_held then adjust_bass(-0.1) else adjust_volume(-0.1) end
+            return
+        elseif key_name == "right" then
             M.state.active_tab = 2
             M.redraw_screen()
+            return
         end
-        
     elseif M.state.active_tab == 2 then -- Search Tab Hotkeys
         if key_name == "left" and not M.state.in_search_result_view then
             M.state.active_tab = 1
@@ -783,6 +835,13 @@ local function handle_key_press(key, is_held)
 end
 
 
+local function handle_key_up(key)
+    local key_name = keys.getName(key)
+    if key_name == "leftCtrl" or key_name == "rightCtrl" then
+        M.state.ctrl_held = false
+    end
+end
+
 local function handle_click_out()
     while M.state.waiting_for_input and M.state.input_mode == "search" do
         local event, button, x, y = os.pullEvent("mouse_click")
@@ -821,6 +880,11 @@ function M.ui_loop()
                 function ()
                     local ev, key, is_held = os.pullEvent("key")
                     handle_key_press(key, is_held)
+                end,
+
+                function ()
+                    local ev, key = os.pullEvent("key_up")
+                    handle_key_up(key)
                 end,
 
                 function ()
