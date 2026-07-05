@@ -13,11 +13,12 @@ local prog_args = { ... }
 
 
 local BASE_URL = "https://raw.githubusercontent.com/sevennnoff/redionet/refs/heads/main/"
-local INSTALL_VERSION = "2026-07-05-stall-recovery"
+local INSTALL_VERSION = "2026-07-05-barrier-fix"
 
 local filemap = {}
 
 filemap["server"] = {
+    ["./lib/version.lua"] = BASE_URL ..          "lib/version.lua",
     ["./server.lua"] = BASE_URL ..              "server/server.lua",
     ["./server_lib/audio.lua"] = BASE_URL ..    "server/server_lib/audio.lua",
     ["./server_lib/auth.lua"] = BASE_URL ..     "server/server_lib/auth.lua",
@@ -27,6 +28,7 @@ filemap["server"] = {
 }
 
 filemap["client"] = {
+    ["./lib/version.lua"] = BASE_URL ..          "lib/version.lua",
     ["./client.lua"] = BASE_URL ..              "client/client.lua",
     ["./client_lib/net.lua"] = BASE_URL ..      "client/client_lib/net.lua",
     ["./client_lib/bass_boost.lua"] = BASE_URL .. "client/client_lib/bass_boost.lua",
@@ -35,6 +37,7 @@ filemap["client"] = {
 }
 
 filemap["controller"] = {
+    ["./lib/version.lua"] = BASE_URL ..          "lib/version.lua",
     ["./client.lua"] = BASE_URL ..              "client/client.lua",
     ["./client_lib/net.lua"] = BASE_URL ..      "client/client_lib/net.lua",
     ["./client_lib/bass_boost.lua"] = BASE_URL .. "client/client_lib/bass_boost.lua",

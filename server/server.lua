@@ -339,8 +339,9 @@ local function server_event_loop()
             function ()
                 os.pullEvent('redionet:update') -- Queued by command `rn update`
 
-                print('Updating...')
-                local install_url = "https://raw.githubusercontent.com/sevennnoff/redionet/refs/heads/main/install.lua"
+                print('Updating server and broadcasting to clients...')
+                local ok, version = pcall(require, "lib.version")
+                local install_url = "https://raw.githubusercontent.com/sevennnoff/redionet/refs/heads/main/install.lua?rn_v=" .. textutils.urlEncode(ok and version or "latest")
                 local tabid = shell.openTab('wget run ' .. install_url)
                 shell.switchTab(tabid)
             end,

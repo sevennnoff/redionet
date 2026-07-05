@@ -4,9 +4,9 @@
 ]]
 
 local speaker = peripheral.find("speaker")
+local REDIONET_VERSION = require("lib.version")
 
 local dbgmon = function (message) end
-local CHUNK_STALL_SEC = 7.0
 
 local function debug_init()
     settings.load()
@@ -88,6 +88,10 @@ function M.send_server_bass(bass)
     return M.send_server_player("BASS", bass)
 end
 
+local function send_audio_connection(status)
+    rednet.send(SERVER_ID, {status, REDIONET_VERSION}, REDIONET_PROTO.AUDIO_CONNECTION)
+end
+
 function M.send_server_sync()
     if not can_control() then return false end
     return M.send_server_player("SYNC")
@@ -97,11 +101,11 @@ function M.toggle_play_local()
     if CSTATE.is_paused or CSTATE.is_paused == nil then
         CSTATE.is_paused = false
         local status = speaker and 1 or -1
-        rednet.send(SERVER_ID, status, REDIONET_PROTO.AUDIO_CONNECTION)
+        send_audio_connection(status)
     else
         CSTATE.is_paused = true
         if speaker then
-            rednet.send(SERVER_ID, 0, REDIONET_PROTO.AUDIO_CONNECTION)
+            send_audio_connection(0)
             os.queueEvent("redionet:playback_stopped")
             speaker.stop()
          end
@@ -121,13 +125,7 @@ local function play_audio(buffer, state)
         state.audio_position_sec, state.chunk_id, state.song_id, volume))
     os.queueEvent("redionet:audio_timestamp", state.audio_position_sec)
 
-    local deadline_ms = os.epoch("local") + CHUNK_STALL_SEC * 1000
     while not speaker.playAudio(buffer, volume) do
-        if os.epoch("local") >= deadline_ms then
-            dbgmon('STALL: giving up on chunk')
-            speaker.stop()
-            return false
-        end
         dbgmon('SPEAKER FULL')
         parallel.waitForAny(
             function()
@@ -155,7 +153,7 @@ function M.receive_loop()
 
     debug_init()
 
-    rednet.send(SERVER_ID, CSTATE.is_paused and 0 or 1, REDIONET_PROTO.AUDIO_CONNECTION)
+    send_audio_connection(CSTATE.is_paused and 0 or 1)
     os.queueEvent('redionet:sync_state')
 
     while true do
@@ -186,7 +184,7 @@ function M.receive_loop()
             function ()
                 while true do
                     local sid, _ = rednet.receive(REDIONET_PROTO.AUDIO_STATUS)
-                    rednet.send(sid, CSTATE.is_paused and 0 or 1, REDIONET_PROTO.AUDIO_CONNECTION)
+                    rednet.send(sid, {CSTATE.is_paused and 0 or 1, REDIONET_VERSION}, REDIONET_PROTO.AUDIO_CONNECTION)
                 end
             end
         )
